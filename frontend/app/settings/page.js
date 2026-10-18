@@ -141,7 +141,7 @@ export default function SettingsPage() {
             <div className="flex items-center justify-between mb-3">
               <span className="font-semibold text-xs text-zinc-900 dark:text-zinc-100 flex items-center gap-1.5">
                 <Cpu className="h-4 w-4 text-purple-600" />
-                Local Ollama AI
+                {health?.ollama?.provider === "openai_compatible" ? "Hosted AI Inference" : "Local Ollama AI"}
               </span>
               {health?.ollama?.reachable ? (
                 <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-400">
@@ -156,17 +156,22 @@ export default function SettingsPage() {
 
             <div className="space-y-2 text-xs text-zinc-600 dark:text-zinc-400">
               <div className="flex justify-between">
+                <span>Provider:</span>
+                <span className="font-semibold text-zinc-900 dark:text-zinc-100">{health?.ollama?.provider === "openai_compatible" ? "OpenAI-Compatible (Hosted)" : "Ollama (Local)"}</span>
+              </div>
+              <div className="flex justify-between">
                 <span>Endpoint:</span>
-                <span className="font-mono text-zinc-900 dark:text-zinc-100">{health?.ollama?.base_url || "http://127.0.0.1:11434"}</span>
+                <span className="font-mono text-zinc-900 dark:text-zinc-100 truncate max-w-[180px]" title={health?.ollama?.base_url}>{health?.ollama?.base_url || "http://127.0.0.1:11434"}</span>
               </div>
               <div className="flex justify-between">
                 <span>Target Model:</span>
                 <span className="font-semibold text-zinc-900 dark:text-zinc-100">{health?.ollama?.model || "qwen2.5:3b"}</span>
               </div>
-              <div className="flex justify-between">
-                <span>Model Installed:</span>
-                <span>{health?.ollama?.model_installed ? "Yes (Ready)" : "No"}</span>
-              </div>
+              {health?.ollama?.error_message && (
+                <div className="rounded bg-amber-50 p-2 text-[11px] text-amber-700 dark:bg-amber-950/50 dark:text-amber-400 border border-amber-200 dark:border-amber-800">
+                  {health.ollama.error_message}
+                </div>
+              )}
               <div className="flex justify-between">
                 <span>Ping Latency:</span>
                 <span>{health?.ollama?.latency_ms ? `${health.ollama.latency_ms} ms` : "—"}</span>
@@ -174,29 +179,29 @@ export default function SettingsPage() {
             </div>
           </div>
 
-          {/* SQLite DB Card */}
+          {/* Database Card */}
           <div className="rounded-lg border border-zinc-200 bg-white p-5 shadow-xs dark:border-zinc-800 dark:bg-zinc-900">
             <div className="flex items-center justify-between mb-3">
               <span className="font-semibold text-xs text-zinc-900 dark:text-zinc-100 flex items-center gap-1.5">
                 <Database className="h-4 w-4 text-blue-600" />
-                Local SQLite Database
+                {health?.database?.engine === "postgresql" || health?.database?.type?.includes("Neon") || health?.database?.type?.includes("PostgreSQL") ? "Neon PostgreSQL Database" : "Local SQLite Database"}
               </span>
               <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-400">
-                Active
+                {health?.database?.status === "connected" ? "Active" : "Error"}
               </span>
             </div>
 
             <div className="space-y-2 text-xs text-zinc-600 dark:text-zinc-400">
               <div className="flex justify-between">
-                <span>Mode:</span>
-                <span className="text-zinc-900 dark:text-zinc-100">SQLite 3 (WAL Mode)</span>
+                <span>Engine:</span>
+                <span className="text-zinc-900 dark:text-zinc-100">{health?.database?.type || (health?.database?.engine === "postgresql" ? "PostgreSQL (Neon Serverless)" : "SQLite 3 (WAL Mode)")}</span>
               </div>
               <div className="flex justify-between">
                 <span>Stored Leads:</span>
                 <span className="font-bold text-zinc-900 dark:text-zinc-100">{health?.database?.leads_count ?? 0}</span>
               </div>
               <div className="truncate text-[10px] text-zinc-400 mt-2" title={health?.database?.path}>
-                Path: {health?.database?.path}
+                Target: {health?.database?.path}
               </div>
             </div>
           </div>

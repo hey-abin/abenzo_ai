@@ -24,18 +24,20 @@ async def get_system_health():
     except Exception:
         db_ok = False
 
+    is_pg = settings.is_postgres
     return {
         "status": "online",
         "database": {
             "status": "connected" if db_ok else "error",
-            "type": "SQLite (WAL mode)",
-            "path": settings.DB_PATH,
+            "type": "Neon PostgreSQL (Cloud)" if is_pg else "SQLite 3 (WAL mode)",
+            "engine": "postgresql" if is_pg else "sqlite",
+            "path": "neon-cloud-production" if is_pg else settings.DB_PATH,
             "leads_count": lead_count
         },
         "ollama": ollama_status.model_dump(),
         "meta": {
-            "configured": bool(settings.META_APP_ID and settings.META_ACCESS_TOKEN),
-            "status": "connected" if bool(settings.META_APP_ID and settings.META_ACCESS_TOKEN) else "not_configured"
+            "configured": bool(settings.effective_instagram_app_id and settings.effective_instagram_token),
+            "status": "connected" if bool(settings.effective_instagram_app_id and settings.effective_instagram_token) else "not_configured"
         }
     }
 

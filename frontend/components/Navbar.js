@@ -68,17 +68,27 @@ export default function Navbar() {
           {health?.ollama?.reachable ? (
             <div className="flex items-center gap-1.5 rounded-full bg-emerald-50 px-2.5 py-1 text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800">
               <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
-              <span>Ollama ({health.ollama.model})</span>
+              <span>{health.ollama.provider === "openai_compatible" ? `AI (${health.ollama.model})` : `Ollama (${health.ollama.model})`}</span>
             </div>
           ) : (
-            <div className="flex items-center gap-1.5 rounded-full bg-amber-50 px-2.5 py-1 text-amber-700 dark:bg-amber-950/50 dark:text-amber-400 border border-amber-200 dark:border-amber-800">
+            <div 
+              className="flex items-center gap-1.5 rounded-full bg-amber-50 px-2.5 py-1 text-amber-700 dark:bg-amber-950/50 dark:text-amber-400 border border-amber-200 dark:border-amber-800 cursor-help"
+              title={health?.ollama?.error_message || "AI inference service unreachable"}
+            >
               <AlertCircle className="h-3 w-3" />
-              <span>Ollama Offline</span>
+              <span>{health?.ollama?.provider === "openai_compatible" ? "AI Offline" : "Ollama Offline"}</span>
             </div>
           )}
 
-          <div className="hidden sm:flex items-center gap-1 rounded-full bg-zinc-100 px-2.5 py-1 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400 border border-zinc-200 dark:border-zinc-700">
-            <span>SQLite Local</span>
+          <div className="hidden sm:flex items-center gap-1.5 rounded-full bg-zinc-100 px-2.5 py-1 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400 border border-zinc-200 dark:border-zinc-700">
+            {health?.database?.status === "connected" ? (
+              <>
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                <span>{health?.database?.engine === "postgresql" || health?.database?.type?.includes("Neon") || health?.database?.type?.includes("PostgreSQL") ? "Neon PostgreSQL" : "SQLite Local"}</span>
+              </>
+            ) : (
+              <span>Database Offline</span>
+            )}
           </div>
         </div>
       </div>
