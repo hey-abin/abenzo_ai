@@ -234,23 +234,32 @@ async def receive_meta_webhook(
         prof_row = cursor.fetchone()
         agency_profile = json.loads(prof_row["value"]) if prof_row else {}
 
+        own_ids = {"29266079986333250", "17841428389805643", settings.effective_instagram_app_id}
+        auto_reply_enabled = bool(agency_profile.get("auto_reply_faq_enabled", False))
+
         for entry in entries:
-            # 1. Direct messages
-            messaging = entry.get("messaging", [])
-            for msg_event in messaging:
+            # Support both direct messaging array and changes-based webhook payloads
+            raw_messaging = list(entry.get("messaging", []))
+            for change in entry.get("changes", []):
+                val = change.get("value", {})
+                if isinstance(val, dict) and ("message" in val or "messages" in val):
+                    raw_messaging.append(val)
+
+            for msg_event in raw_messaging:
                 # Discard outbound echoes sent by our page/agents
                 if msg_event.get("message", {}).get("is_echo"):
                     continue
 
                 sender_id = msg_event.get("sender", {}).get("id")
                 mid = msg_event.get("message", {}).get("mid")
-                text = msg_event.get("message", {}).get("text")
+                text = (msg_event.get("message", {}).get("text") or 
+                        (msg_event.get("message", {}).get("attachments") and "[Media / Attachment]") or "").strip()
 
                 if not mid or not text or not sender_id:
                     continue
 
                 # Ignore messages from our own business account ID
-                if sender_id == "29266079986333250" or sender_id == settings.effective_instagram_app_id:
+                if sender_id in own_ids:
                     continue
 
                 # Deduplication
@@ -310,16 +319,18 @@ async def receive_meta_webhook(
                     needs_human = True
 
                 # Determine if eligible for automated outbound dispatch:
+                # - Explicit auto_reply_faq_enabled setting is active
                 # - High-confidence, routine response grounded in approved knowledge (needs_human is False)
                 # - Real inbound recipient within the Meta 24h messaging window
                 # - Instagram access token configured
                 is_auto_reply_eligible = (
+                    auto_reply_enabled and
                     bool(ai_draft) and
                     not needs_human and
                     bool(settings.effective_instagram_token) and
                     not sender_id.startswith("sample_") and
                     not sender_id.startswith("manual_") and
-                    sender_id != "29266079986333250"
+                    sender_id not in own_ids
                 )
 
                 if is_auto_reply_eligible:
@@ -585,7 +596,7 @@ async def send_approved_reply(payload: SendReplyRequest):
 
         # 2. Recipient ID verification (must originate from an inbound conversation)
         recipient_id = (conv.get("recipient_id") or conv.get("external_thread_id") or "").strip()
-        if not recipient_id or recipient_id.startswith("sample_") or recipient_id.startswith("manual_") or recipient_id == "29266079986333250":
+        if not recipient_id or recipient_id.startswith("sample_") or recipient_id.startswith("manual_") or recipient_id in ("29266079986333250", "17841428389805643"):
             raise HTTPException(
                 status_code=400,
                 detail="Invalid recipient ID: Inbound Instagram conversation does not have a verified external user recipient ID."

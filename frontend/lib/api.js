@@ -111,6 +111,19 @@ export async function sendEventReply(eventId, approvedText) {
   return res.json();
 }
 
+export async function sendConversationReply(conversationId, messageText) {
+  const res = await fetch(`${API_BASE}/inbox/conversations/${conversationId}/reply`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message_text: messageText }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: "Failed to dispatch reply" }));
+    throw new Error(err.detail || "Failed to dispatch reply");
+  }
+  return res.json();
+}
+
 export async function createSampleConversation() {
   const res = await fetch(`${API_BASE}/inbox/sample-conversation`, { method: "POST" });
   if (!res.ok) throw new Error("Failed to create sample conversation");

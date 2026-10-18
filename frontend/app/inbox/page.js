@@ -20,6 +20,7 @@ import {
   fetchConversations, 
   approveEvent, 
   sendEventReply,
+  sendConversationReply,
   createSampleConversation, 
   fetchMetaStatus,
   syncInstagramMessages
@@ -90,21 +91,38 @@ export default function InboxPage() {
     }
   };
 
-  const handleSendToInstagram = async (eventId) => {
+  const handleSendMessage = async (activeEventId = null) => {
     if (!editedReply.trim()) {
       alert("Reply text cannot be blank.");
       return;
     }
-    if (!confirm("Are you sure you want to dispatch this message directly to the recipient on Instagram?")) {
+
+    const isInstagram = selectedConv?.platform === "instagram";
+    const promptMsg = isInstagram 
+      ? "Dispatch this reply directly to the recipient on Instagram via Meta Graph API?" 
+      : "Send this simulated message to the sample thread?";
+
+    if (!confirm(promptMsg)) {
       return;
     }
+
     setSending(true);
     try {
-      const res = await sendEventReply(eventId, editedReply);
-      alert(`Message successfully dispatched to Instagram!\nMeta Message ID: ${res.meta_message_id || "confirmed"}`);
+      if (activeEventId) {
+        const res = await sendEventReply(activeEventId, editedReply);
+        alert(isInstagram 
+          ? `Message successfully dispatched to Instagram!\nMeta Message ID: ${res.meta_message_id || "confirmed"}`
+          : "Simulated reply recorded in sample thread.");
+      } else {
+        const res = await sendConversationReply(selectedConv.id, editedReply);
+        alert(isInstagram 
+          ? `Message successfully dispatched to Instagram!\nMeta Message ID: ${res.meta_message_id || "confirmed"}`
+          : "Simulated reply recorded in sample thread.");
+      }
+      setEditedReply("");
       loadInbox();
     } catch (err) {
-      alert("Instagram Send Error: " + err.message);
+      alert("Send Error: " + err.message);
       loadInbox();
     } finally {
       setSending(false);
@@ -341,7 +359,7 @@ export default function InboxPage() {
                 ))}
               </div>
 
-              {/* AI Suggested Response Box */}
+              {/* Response & Compose Box */}
               {(() => {
                 const activeEvent = selectedConv.events?.find((e) => 
                   e.delivery_status === "draft_pending" || 
@@ -349,42 +367,58 @@ export default function InboxPage() {
                   e.delivery_status === "failed"
                 );
 
-                if (!activeEvent) {
-                  return (
-                    <div className="rounded-md border border-emerald-200 bg-emerald-50/50 p-4 text-xs text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/30 dark:text-emerald-300">
-                      <div className="flex items-center gap-2 font-semibold">
-                        <CheckCircle className="h-4 w-4 text-emerald-600" />
-                        All messages in this thread have been reviewed and dispatched.
-                      </div>
-                    </div>
-                  );
-                }
-
                 const isInstagram = selectedConv.platform === "instagram";
-                const hasValidRecipient = Boolean(selectedConv.recipient_id || (selectedConv.external_thread_id && !selectedConv.external_thread_id.startsWith("sample_") && !selectedConv.external_thread_id.startsWith("manual_")));
+                const isSample = selectedConv.platform === "instagram_sample" || selectedConv.platform === "manual";
+                const hasValidRecipient = Boolean(
+                  selectedConv.recipient_id || 
+                  (selectedConv.external_thread_id && !selectedConv.external_thread_id.startsWith("sample_") && !selectedConv.external_thread_id.startsWith("manual_"))
+                );
 
                 return (
                   <div className="rounded-md border border-purple-200 bg-purple-50/30 p-4 space-y-3 dark:border-purple-900/50 dark:bg-purple-950/20">
                     <div className="flex items-center justify-between">
                       <span className="text-xs font-semibold text-purple-900 dark:text-purple-300 flex items-center gap-1.5">
                         <Sparkles className="h-4 w-4 text-purple-600 dark:text-purple-400" />
-                        {activeEvent.delivery_status === "draft_pending" 
-                          ? "AI Suggested Reply (Ollama qwen2.5:3b)" 
-                          : activeEvent.delivery_status === "approved"
-                          ? "Approved Response (Ready to Dispatch)"
-                          : "Reply Delivery Failed (Review & Retry)"}
+                        {activeEvent ? (
+                          activeEvent.delivery_status === "draft_pending"
+                            ? "AI Suggested Reply Draft (Review & Dispatch)"
+                            : activeEvent.delivery_status === "approved"
+                            ? "Approved Response (Ready to Dispatch)"
+                            : "Reply Delivery Failed (Review & Retry)"
+                        ) : (
+                          "Compose Message / Follow-up"
+                        )}
                       </span>
                       <span className="text-[10px] text-zinc-500">
-                        Status: <strong className="uppercase">{activeEvent.delivery_status}</strong>
+                        {isInstagram ? (
+                          <span className="text-pink-600 font-semibold flex items-center gap-1">
+                            <InstagramIcon className="h-3 w-3 inline" /> Live Instagram DM
+                          </span>
+                        ) : (
+                          <span className="text-purple-600 font-medium">Sample Thread (Demo Mode)</span>
+                        )}
+                        {activeEvent ? ` • STATUS: ${activeEvent.delivery_status.toUpperCase()}` : ""}
                       </span>
                     </div>
 
                     <div className="space-y-1.5">
-                      <label className="text-[11px] font-medium text-zinc-700 dark:text-zinc-300">
-                        Response Text (Human Approval Mandatory):
-                      </label>
+                      <div className="flex items-center justify-between">
+                        <label className="text-[11px] font-medium text-zinc-700 dark:text-zinc-300">
+                          {activeEvent ? "Response Text (Human Approval Mandatory):" : "Reply Text:"}
+                        </label>
+                        {activeEvent?.ai_draft && editedReply !== activeEvent.ai_draft && (
+                          <button
+                            type="button"
+                            onClick={() => setEditedReply(activeEvent.ai_draft)}
+                            className="text-[10px] text-purple-600 hover:text-purple-800 dark:text-purple-400"
+                          >
+                            Reset to AI Draft
+                          </button>
+                        )}
+                      </div>
                       <textarea
                         rows="3"
+                        placeholder="Type your reply to this prospect..."
                         value={editedReply}
                         onChange={(e) => setEditedReply(e.target.value)}
                         className="w-full rounded border border-zinc-300 p-2.5 text-xs bg-white text-zinc-900 dark:bg-zinc-800 dark:text-zinc-100 dark:border-zinc-700 focus:outline-hidden"
@@ -394,27 +428,36 @@ export default function InboxPage() {
                     <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 pt-1">
                       <span className="text-[11px] text-zinc-500 flex items-center gap-1">
                         <ShieldAlert className="h-3.5 w-3.5 text-amber-500 shrink-0" />
-                        Explicit confirmation required before live API delivery.
+                        {isInstagram 
+                          ? "Dispatches directly to recipient via official Meta Graph API."
+                          : "Simulated send for sample conversation testing."}
                       </span>
 
                       <div className="flex items-center gap-2">
-                        <button
-                          onClick={() => handleApprove(activeEvent.id)}
-                          disabled={approving || sending}
-                          className="inline-flex items-center gap-1.5 rounded border border-zinc-300 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
-                        >
-                          <Check className="h-3.5 w-3.5 text-blue-500" />
-                          {approving ? "Saving..." : "Approve Only"}
-                        </button>
+                        {activeEvent && (
+                          <button
+                            type="button"
+                            onClick={() => handleApprove(activeEvent.id)}
+                            disabled={approving || sending}
+                            className="inline-flex items-center gap-1.5 rounded border border-zinc-300 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
+                          >
+                            <Check className="h-3.5 w-3.5 text-blue-500" />
+                            {approving ? "Saving..." : "Approve Only"}
+                          </button>
+                        )}
 
                         <button
-                          onClick={() => handleSendToInstagram(activeEvent.id)}
-                          disabled={approving || sending || !isInstagram || !hasValidRecipient}
-                          title={!isInstagram || !hasValidRecipient ? "Live sending requires an inbound Instagram conversation with a verified user ID" : "Dispatch to Instagram"}
+                          type="button"
+                          onClick={() => handleSendMessage(activeEvent?.id)}
+                          disabled={approving || sending || (isInstagram && !hasValidRecipient)}
                           className="inline-flex items-center gap-1.5 rounded bg-zinc-900 px-3.5 py-1.5 text-xs font-medium text-white hover:bg-zinc-800 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900"
                         >
                           <Send className="h-3.5 w-3.5 text-emerald-400" />
-                          {sending ? "Sending to IG..." : activeEvent.delivery_status === "failed" ? "Retry Send to IG" : "Send to Instagram"}
+                          {sending 
+                            ? "Sending..." 
+                            : isInstagram
+                            ? (activeEvent?.delivery_status === "failed" ? "Retry Send to IG" : "Send to Instagram")
+                            : "Send Message (Sample)"}
                         </button>
                       </div>
                     </div>

@@ -480,6 +480,30 @@ export default function SettingsPage() {
                 </div>
               </div>
 
+              {/* Explicit Auto-Reply Setting */}
+              <div className="rounded-md border border-purple-200 bg-purple-50/40 p-3.5 dark:border-purple-900/40 dark:bg-purple-950/20">
+                <div className="flex items-center justify-between">
+                  <div className="pr-4">
+                    <span className="font-semibold text-zinc-900 dark:text-zinc-100 flex items-center gap-1.5">
+                      <Sparkles className="h-4 w-4 text-purple-600 dark:text-purple-400" />
+                      Automated FAQ Replies (Instagram DMs)
+                    </span>
+                    <p className="text-[11px] text-zinc-500 mt-1">
+                      When enabled, the backend will automatically dispatch replies to genuine inbound DMs for routine, high-confidence questions grounded in approved FAQs. Complex questions, quotes, and complaints will always require human review.
+                    </p>
+                  </div>
+                  <label className="relative inline-flex items-center cursor-pointer shrink-0">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(profile.auto_reply_faq_enabled)}
+                      onChange={(e) => setProfile({ ...profile, auto_reply_faq_enabled: e.target.checked })}
+                      className="sr-only peer"
+                    />
+                    <div className="w-11 h-6 bg-zinc-300 peer-focus:outline-none rounded-full peer dark:bg-zinc-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all dark:border-zinc-600 peer-checked:bg-purple-600"></div>
+                  </label>
+                </div>
+              </div>
+
               <div className="flex items-center justify-end pt-4 border-t border-zinc-100 dark:border-zinc-800">
                 <button
                   type="submit"

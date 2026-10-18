@@ -9,7 +9,8 @@ from backend.app.schemas import (
     ConversationEventResponse,
     ConversationEventCreate,
     SendReplyRequest,
-    SendReplyResponse
+    SendReplyResponse,
+    ConversationReplyRequest
 )
 from backend.app.services.ollama_service import draft_inbound_response_with_ai
 
@@ -174,6 +175,134 @@ async def send_event_reply(event_id: int, approved_text: Optional[str] = None):
     """
     from backend.app.routers.meta import send_approved_reply
     return await send_approved_reply(SendReplyRequest(event_id=event_id, approved_text=approved_text))
+
+@router.post("/conversations/{conv_id}/reply", response_model=SendReplyResponse)
+async def send_conversation_reply(conv_id: int, payload: ConversationReplyRequest):
+    """
+    Directly dispatches a reply to an ongoing conversation from the dashboard.
+    - For live Instagram conversations: dispatches via official Meta Graph API to the inbound sender.
+    - For sample/manual conversations: simulates delivery with a verified mock event so UI testing works.
+    - Enforces 24-hour messaging window and records full event history in Neon.
+    """
+    text_to_send = (payload.message_text or "").strip()
+    if not text_to_send:
+        raise HTTPException(status_code=400, detail="Reply message text cannot be empty.")
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM conversations WHERE id = ?", (conv_id,))
+        conv_row = cursor.fetchone()
+        if not conv_row:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+
+        conv = dict(conv_row)
+        platform = conv.get("platform", "")
+        recipient_id = (conv.get("recipient_id") or conv.get("external_thread_id") or "").strip()
+        now = datetime.now().isoformat()
+
+        # Handle sample / manual test conversations
+        if platform in ("instagram_sample", "manual") or recipient_id.startswith("sample_") or recipient_id.startswith("manual_"):
+            cursor.execute("""
+                INSERT INTO conversation_events (
+                    conversation_id, external_event_id, event_type, direction,
+                    message_text, approved_text, delivery_status, meta_message_id, sent_at, created_at
+                ) VALUES (?, ?, 'dm', 'outbound', ?, ?, 'sent', 'sample_mock_sent', ?, ?)
+            """, (conv_id, f"sample_out_{uuid.uuid4().hex[:10]}", text_to_send, text_to_send, now, now))
+            event_id = cursor.lastrowid
+
+            cursor.execute("""
+                UPDATE conversations SET
+                    last_message_at = ?,
+                    needs_human = 0,
+                    updated_at = ?
+                WHERE id = ?
+            """, (now, now, conv_id))
+            conn.commit()
+
+            return SendReplyResponse(
+                status="sent",
+                event_id=event_id,
+                delivery_status="sent",
+                meta_message_id="sample_mock_sent",
+                recipient_id=recipient_id,
+                sent_at=now,
+                error_details=""
+            )
+
+        # Real Instagram conversation verification
+        if platform != "instagram":
+            raise HTTPException(
+                status_code=400,
+                detail=f"Outbound delivery only supported for Instagram conversations (current platform: '{platform}')."
+            )
+
+        if not recipient_id or recipient_id in ("29266079986333250", "17841428389805643"):
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid recipient ID: Inbound conversation does not have a verified Instagram user ID."
+            )
+
+        # Create outbound event in 'sending' state
+        cursor.execute("""
+            INSERT INTO conversation_events (
+                conversation_id, external_event_id, event_type, direction,
+                message_text, approved_text, delivery_status, created_at
+            ) VALUES (?, ?, 'dm', 'outbound', ?, ?, 'sending', ?)
+        """, (conv_id, f"out_{uuid.uuid4().hex[:12]}", text_to_send, text_to_send, now))
+        event_id = cursor.lastrowid
+        conn.commit()
+
+    # Dispatch to Instagram Graph API
+    from backend.app.routers.meta import dispatch_instagram_dm
+    dispatch_result = await dispatch_instagram_dm(recipient_id, text_to_send)
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        now = datetime.now().isoformat()
+
+        if dispatch_result["success"]:
+            meta_mid = dispatch_result["meta_message_id"]
+            cursor.execute("""
+                UPDATE conversation_events SET
+                    delivery_status = 'sent',
+                    meta_message_id = ?,
+                    sent_at = ?,
+                    error_details = ''
+                WHERE id = ?
+            """, (meta_mid, now, event_id))
+
+            cursor.execute("""
+                UPDATE conversations SET
+                    last_message_at = ?,
+                    needs_human = 0,
+                    updated_at = ?
+                WHERE id = ?
+            """, (now, now, conv_id))
+            conn.commit()
+
+            return SendReplyResponse(
+                status="sent",
+                event_id=event_id,
+                delivery_status="sent",
+                meta_message_id=meta_mid,
+                recipient_id=recipient_id,
+                sent_at=now,
+                error_details=""
+            )
+        else:
+            err = dispatch_result["error_details"]
+            cursor.execute("""
+                UPDATE conversation_events SET
+                    delivery_status = 'failed',
+                    error_details = ?
+                WHERE id = ?
+            """, (err, event_id))
+            conn.commit()
+
+            raise HTTPException(
+                status_code=502,
+                detail=f"Meta Instagram delivery failed: {err}"
+            )
 
 @router.post("/sample-conversation")
 async def create_sample_conversation():

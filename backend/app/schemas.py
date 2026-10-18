@@ -118,6 +118,9 @@ class SendReplyRequest(BaseModel):
     event_id: int
     approved_text: Optional[str] = None
 
+class ConversationReplyRequest(BaseModel):
+    message_text: str
+
 class SendReplyResponse(BaseModel):
     status: str  # 'sent' or 'failed'
     event_id: int

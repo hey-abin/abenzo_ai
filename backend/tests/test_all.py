@@ -163,7 +163,16 @@ def test_inbound_webhook_auto_reply_flow(monkeypatch):
     assert resp_echo.json()["events_processed"] == 0
     assert len(dispatched_calls) == 0
 
-    # 2. Routine high-confidence inquiry
+    # 2. Routine high-confidence inquiry (requires explicit auto_reply_faq_enabled)
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT value FROM app_settings WHERE key = 'business_profile'")
+        r = cursor.fetchone()
+        p = json.loads(r["value"]) if r else {}
+        p["auto_reply_faq_enabled"] = True
+        cursor.execute("UPDATE app_settings SET value = ? WHERE key = 'business_profile'", (json.dumps(p),))
+        conn.commit()
+
     async def mock_draft_routine(incoming, history, profile):
         return {
             "ai_draft": "Abenzo Starter Package starts at ₹15,000+ for 3-5 pages.",
@@ -244,6 +253,45 @@ def test_inbound_webhook_auto_reply_flow(monkeypatch):
 
         cursor.execute("SELECT needs_human FROM conversations WHERE external_thread_id = 'ig_user_auto_complex_1'")
         assert cursor.fetchone()["needs_human"] == 1
+
+def test_dashboard_send_conversation_reply(monkeypatch):
+    """Verifies that the dashboard can send messages directly in an ongoing conversation."""
+    # 1. Sample thread simulated reply
+    sample_resp = client.post("/api/inbox/sample-conversation")
+    conv_id = sample_resp.json()["conversation_id"]
+
+    reply_resp = client.post(f"/api/inbox/conversations/{conv_id}/reply", json={
+        "message_text": "Hello, thank you for reaching out!"
+    })
+    assert reply_resp.status_code == 200
+    assert reply_resp.json()["status"] == "sent"
+    assert reply_resp.json()["delivery_status"] == "sent"
+
+    # 2. Live Instagram thread reply with dispatch
+    dispatched = []
+    async def mock_dispatch(recipient_id, text):
+        dispatched.append({"recipient_id": recipient_id, "text": text})
+        return {"success": True, "meta_message_id": "mid_dash_reply_001", "error_details": ""}
+
+    monkeypatch.setattr("backend.app.routers.meta.dispatch_instagram_dm", mock_dispatch)
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        now = "2026-10-18T12:00:00"
+        cursor.execute("""
+            INSERT INTO conversations (platform, external_thread_id, recipient_id, contact_display_name, status, needs_human, created_at, updated_at)
+            VALUES ('instagram', 'ig_user_dash_test', 'ig_user_dash_test', 'IG Dash User', 'active', 1, ?, ?)
+        """, (now, now))
+        live_conv_id = cursor.lastrowid
+        conn.commit()
+
+    live_reply = client.post(f"/api/inbox/conversations/{live_conv_id}/reply", json={
+        "message_text": "Live reply from dashboard to Instagram user"
+    })
+    assert live_reply.status_code == 200
+    assert live_reply.json()["status"] == "sent"
+    assert len(dispatched) == 1
+    assert dispatched[0]["recipient_id"] == "ig_user_dash_test"
 
 def test_human_approval_rule_for_inbox():
     # Create sample conversation
