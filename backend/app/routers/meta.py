@@ -525,21 +525,27 @@ async def dispatch_instagram_dm(recipient_id: str, message_text: str) -> Dict[st
             resp = await client.post(url, json=payload, headers=headers)
 
             if resp.status_code != 200:
-                try:
-                    err_json = resp.json().get("error", {})
-                    err_msg = err_json.get("message", "Meta Graph API error")
-                    err_code = err_json.get("code", resp.status_code)
-                    err_subcode = err_json.get("error_subcode", "")
-                    sub_str = f" (subcode {err_subcode})" if err_subcode else ""
-                    sanitized_err = f"Meta API error [{err_code}{sub_str}]: {err_msg}"
-                except Exception:
-                    sanitized_err = f"Meta API returned HTTP status {resp.status_code}"
+                # If graph.instagram.com fails, try graph.facebook.com (standard for Page-linked Instagram accounts)
+                fb_url = "https://graph.facebook.com/v21.0/me/messages"
+                fb_resp = await client.post(fb_url, json=payload, headers=headers)
+                if fb_resp.status_code == 200:
+                    resp = fb_resp
+                else:
+                    try:
+                        err_json = resp.json().get("error", {})
+                        err_msg = err_json.get("message", "Meta Graph API error")
+                        err_code = err_json.get("code", resp.status_code)
+                        err_subcode = err_json.get("error_subcode", "")
+                        sub_str = f" (subcode {err_subcode})" if err_subcode else ""
+                        sanitized_err = f"Meta API error [{err_code}{sub_str}]: {err_msg}"
+                    except Exception:
+                        sanitized_err = f"Meta API returned HTTP status {resp.status_code}"
 
-                return {
-                    "success": False,
-                    "error_details": sanitized_err,
-                    "meta_message_id": ""
-                }
+                    return {
+                        "success": False,
+                        "error_details": sanitized_err,
+                        "meta_message_id": ""
+                    }
 
             data = resp.json()
             message_id = data.get("message_id") or data.get("id") or ""

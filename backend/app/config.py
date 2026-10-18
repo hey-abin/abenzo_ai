@@ -56,11 +56,19 @@ class Settings(BaseSettings):
 
     @property
     def allowed_cors_origins(self) -> list[str]:
-        default_origins = ["http://localhost:3000", "http://127.0.0.1:3000"]
+        base_origins = [
+            "https://abenzo-ai.vercel.app",
+            "https://abenzo.vercel.app",
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+        ]
         if not self.CORS_ORIGINS.strip():
-            return default_origins
+            return base_origins
         origins = [o.strip() for o in self.CORS_ORIGINS.split(",") if o.strip()]
-        return origins or default_origins
+        for b in base_origins:
+            if b not in origins:
+                origins.append(b)
+        return origins
 
     model_config = SettingsConfigDict(
         env_file=(str(ROOT_DIR / ".env"), str(BASE_DIR / ".env"), ".env"),

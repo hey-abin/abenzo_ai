@@ -29,12 +29,14 @@ export default function SettingsPage() {
   const [metaStatus, setMetaStatus] = useState(null);
   const [profile, setProfile] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
   const [saving, setSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [testingMeta, setTestingMeta] = useState(false);
 
   const loadAll = () => {
     setLoading(true);
+    setLoadError(null);
     Promise.all([
       fetchSystemHealth(),
       fetchMetaStatus(),
@@ -44,10 +46,12 @@ export default function SettingsPage() {
         setHealth(h);
         setMetaStatus(m);
         setProfile(p);
+        setLoadError(null);
         setLoading(false);
       })
       .catch((err) => {
         console.error("Settings load error:", err);
+        setLoadError(err.message || "Failed to load settings from backend. Service may be starting up.");
         setLoading(false);
       });
   };
@@ -133,17 +137,40 @@ export default function SettingsPage() {
         </button>
       </div>
 
+      {loadError && (
+        <div className="rounded-md border border-amber-200 bg-amber-50 p-4 dark:border-amber-900/50 dark:bg-amber-950/20">
+          <div className="flex items-start gap-3">
+            <AlertCircle className="h-5 w-5 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+            <div className="text-xs text-amber-800 dark:text-amber-300">
+              <p className="font-semibold">Unable to fetch backend diagnostics</p>
+              <p className="mt-0.5">{loadError}</p>
+              <p className="mt-1 text-[11px] text-amber-700 dark:text-amber-400">
+                If the backend on Render was inactive, it may be waking up from sleep. Please wait a moment and click <strong>Refresh Diagnostics</strong>.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
         {/* Diagnostics Side Column */}
         <div className="space-y-6 lg:col-span-1">
-          {/* Ollama Health Card */}
+          {/* AI Health Card */}
           <div className="rounded-lg border border-zinc-200 bg-white p-5 shadow-xs dark:border-zinc-800 dark:bg-zinc-900">
             <div className="flex items-center justify-between mb-3">
               <span className="font-semibold text-xs text-zinc-900 dark:text-zinc-100 flex items-center gap-1.5">
                 <Cpu className="h-4 w-4 text-purple-600" />
-                {health?.ollama?.provider === "openai_compatible" ? "Hosted AI Inference" : "Local Ollama AI"}
+                {health?.ollama?.provider === "openai_compatible" 
+                  ? "Hosted AI Inference" 
+                  : health 
+                    ? "Local Ollama AI" 
+                    : "AI Inference Provider"}
               </span>
-              {health?.ollama?.reachable ? (
+              {loading && !health ? (
+                <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] font-semibold text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400 animate-pulse">
+                  Checking...
+                </span>
+              ) : health?.ollama?.reachable ? (
                 <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-400">
                   Online
                 </span>
@@ -157,15 +184,21 @@ export default function SettingsPage() {
             <div className="space-y-2 text-xs text-zinc-600 dark:text-zinc-400">
               <div className="flex justify-between">
                 <span>Provider:</span>
-                <span className="font-semibold text-zinc-900 dark:text-zinc-100">{health?.ollama?.provider === "openai_compatible" ? "OpenAI-Compatible (Hosted)" : "Ollama (Local)"}</span>
+                <span className="font-semibold text-zinc-900 dark:text-zinc-100">
+                  {loading && !health ? "Connecting..." : health?.ollama?.provider === "openai_compatible" ? "OpenAI-Compatible (Hosted)" : health ? "Ollama (Local)" : "Unavailable"}
+                </span>
               </div>
               <div className="flex justify-between">
                 <span>Endpoint:</span>
-                <span className="font-mono text-zinc-900 dark:text-zinc-100 truncate max-w-[180px]" title={health?.ollama?.base_url}>{health?.ollama?.base_url || "http://127.0.0.1:11434"}</span>
+                <span className="font-mono text-zinc-900 dark:text-zinc-100 truncate max-w-[180px]" title={health?.ollama?.base_url}>
+                  {loading && !health ? "Connecting..." : health?.ollama?.base_url || (health ? "http://127.0.0.1:11434" : "Unavailable")}
+                </span>
               </div>
               <div className="flex justify-between">
                 <span>Target Model:</span>
-                <span className="font-semibold text-zinc-900 dark:text-zinc-100">{health?.ollama?.model || "qwen2.5:3b"}</span>
+                <span className="font-semibold text-zinc-900 dark:text-zinc-100">
+                  {loading && !health ? "Connecting..." : health?.ollama?.model || "—"}
+                </span>
               </div>
               {health?.ollama?.error_message && (
                 <div className="rounded bg-amber-50 p-2 text-[11px] text-amber-700 dark:bg-amber-950/50 dark:text-amber-400 border border-amber-200 dark:border-amber-800">
@@ -184,24 +217,42 @@ export default function SettingsPage() {
             <div className="flex items-center justify-between mb-3">
               <span className="font-semibold text-xs text-zinc-900 dark:text-zinc-100 flex items-center gap-1.5">
                 <Database className="h-4 w-4 text-blue-600" />
-                {health?.database?.engine === "postgresql" || health?.database?.type?.includes("Neon") || health?.database?.type?.includes("PostgreSQL") ? "Neon PostgreSQL Database" : "Local SQLite Database"}
+                {health?.database?.engine === "postgresql" || health?.database?.type?.includes("Neon") || health?.database?.type?.includes("PostgreSQL") 
+                  ? "Neon PostgreSQL Database" 
+                  : health 
+                    ? "Local SQLite Database" 
+                    : "Primary Database"}
               </span>
-              <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-400">
-                {health?.database?.status === "connected" ? "Active" : "Error"}
-              </span>
+              {loading && !health ? (
+                <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] font-semibold text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400 animate-pulse">
+                  Checking...
+                </span>
+              ) : (
+                <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${
+                  health?.database?.status === "connected"
+                    ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-400"
+                    : "bg-red-100 text-red-800 dark:bg-red-950/60 dark:text-red-400"
+                }`}>
+                  {health?.database?.status === "connected" ? "Active" : "Error"}
+                </span>
+              )}
             </div>
 
             <div className="space-y-2 text-xs text-zinc-600 dark:text-zinc-400">
               <div className="flex justify-between">
                 <span>Engine:</span>
-                <span className="text-zinc-900 dark:text-zinc-100">{health?.database?.type || (health?.database?.engine === "postgresql" ? "PostgreSQL (Neon Serverless)" : "SQLite 3 (WAL Mode)")}</span>
+                <span className="text-zinc-900 dark:text-zinc-100">
+                  {loading && !health ? "Connecting..." : health?.database?.type || (health?.database?.engine === "postgresql" ? "PostgreSQL (Neon Serverless)" : health ? "SQLite 3 (WAL Mode)" : "Unavailable")}
+                </span>
               </div>
               <div className="flex justify-between">
                 <span>Stored Leads:</span>
-                <span className="font-bold text-zinc-900 dark:text-zinc-100">{health?.database?.leads_count ?? 0}</span>
+                <span className="font-bold text-zinc-900 dark:text-zinc-100">
+                  {loading && !health ? "—" : health?.database?.leads_count ?? 0}
+                </span>
               </div>
               <div className="truncate text-[10px] text-zinc-400 mt-2" title={health?.database?.path}>
-                Target: {health?.database?.path}
+                Target: {loading && !health ? "Connecting..." : health?.database?.path || "—"}
               </div>
             </div>
           </div>
@@ -213,7 +264,11 @@ export default function SettingsPage() {
                 <InstagramIcon className="h-4 w-4 text-pink-600" />
                 Meta Instagram Connection
               </span>
-              {metaStatus?.status === "connected" ? (
+              {loading && !metaStatus ? (
+                <span className="rounded bg-zinc-100 px-2 py-0.5 text-[10px] font-semibold text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400 animate-pulse">
+                  Checking...
+                </span>
+              ) : metaStatus?.status === "connected" ? (
                 <span className="flex items-center gap-1 rounded bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-400">
                   <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
                   Connected
