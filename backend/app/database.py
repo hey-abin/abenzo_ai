@@ -301,6 +301,19 @@ def init_db(db_path: str = None):
             cursor.execute("ALTER TABLE conversation_events ADD COLUMN IF NOT EXISTS meta_message_id TEXT DEFAULT ''")
             cursor.execute("ALTER TABLE conversation_events ADD COLUMN IF NOT EXISTS error_details TEXT DEFAULT ''")
             cursor.execute("ALTER TABLE conversation_events ADD COLUMN IF NOT EXISTS sent_at TEXT DEFAULT ''")
+
+            # Synchronize serial sequences with current MAX(id) to avoid duplicate key violations
+            for tbl in ("leads", "conversations", "conversation_events", "knowledge_items"):
+                try:
+                    cursor.execute(f"""
+                        SELECT setval(
+                            pg_get_serial_sequence('{tbl}', 'id'),
+                            COALESCE((SELECT MAX(id) FROM {tbl}), 1),
+                            (SELECT MAX(id) FROM {tbl}) IS NOT NULL
+                        );
+                    """)
+                except Exception:
+                    pass
         else:
             # SQLite uses PRAGMA table_info for migration detection
             cursor.execute("PRAGMA table_info(conversations)")

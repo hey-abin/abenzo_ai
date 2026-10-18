@@ -78,19 +78,24 @@ async def check_ollama_health() -> OllamaHealth:
             async with httpx.AsyncClient(timeout=min(timeout, 8.0)) as client:
                 resp = await client.get(url, headers=headers)
                 latency = round((time.time() - start_time) * 1000.0, 1)
-
                 if resp.status_code == 200:
                     data = resp.json()
-                    models = [m.get("id", "") for m in data.get("data", []) if isinstance(m, dict)]
-                    has_model = True if not model else any(model in m for m in models) or bool(models)
+                    all_models = [m.get("id", "") for m in data.get("data", []) if isinstance(m, dict)]
+                    chat_models = [m for m in all_models if not any(x in m.lower() for x in ["whisper", "guard", "audio", "orpheus"])]
+                    has_model = (model in all_models) if model else bool(chat_models)
+                    err_msg = None
+                    if model and not has_model:
+                        rec = ", ".join(chat_models[:3]) if chat_models else "check provider console"
+                        err_msg = f"Configured model '{model}' is unavailable on provider. Recommended chat models: {rec}"
+
                     return OllamaHealth(
                         reachable=True,
                         base_url=base_url,
-                        model=model or (models[0] if models else "default"),
+                        model=model or (chat_models[0] if chat_models else "default"),
                         model_installed=has_model,
-                        available_models=models[:10],
+                        available_models=chat_models[:10] if chat_models else all_models[:10],
                         latency_ms=latency,
-                        error_message=None,
+                        error_message=err_msg,
                         provider="openai_compatible"
                     )
                 elif resp.status_code in (401, 403):
@@ -240,6 +245,21 @@ async def call_ai_completion(prompt: str, temperature: float = 0.2) -> str:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 resp = await client.post(url, json=payload, headers=headers)
 
+                # If the configured model is deprecated or not found (HTTP 404), auto-fallback to an active chat model
+                if resp.status_code == 404 and any(phrase in resp.text.lower() for phrase in ["does not exist", "not have access", "not found"]):
+                    models_resp = await client.get(f"{base_url.rstrip('/')}/models", headers=headers)
+                    if models_resp.status_code == 200:
+                        all_models = [m.get("id", "") for m in models_resp.json().get("data", []) if isinstance(m, dict)]
+                        chat_models = [m for m in all_models if not any(x in m.lower() for x in ["whisper", "guard", "audio", "orpheus"])]
+                        for cand in chat_models:
+                            if cand == model:
+                                continue
+                            payload["model"] = cand
+                            retry_resp = await client.post(url, json=payload, headers=headers)
+                            if retry_resp.status_code == 200:
+                                resp = retry_resp
+                                break
+
                 if resp.status_code == 200:
                     data = resp.json()
                     choices = data.get("choices", [])
@@ -373,6 +393,13 @@ STRICT KNOWLEDGE & HONESTY RULES:
    - State that Abin and the team will confirm the exact details or provide a tailored proposal after discussing requirements.
 5. In your internal reasoning, include the exact source reference (e.g. source URL / package name).
 6. Assess lead temperature: 'early', 'qualified', or 'ready_for_human'.
+7. Set 'needs_human_decision':
+   - Set 'needs_human_decision': false ONLY if:
+     * The customer inquiry is routine and directly answered by approved facts (e.g., list of services, starter package starting price, tech stack, portfolio URL, WhatsApp link).
+     * The reply is clear, high-confidence, helpful, and requires no custom scoping or negotiation.
+   - Set 'needs_human_decision': true if:
+     * The customer asks for exact custom quotes, discounts, contracts, complex enterprise specs, or express timelines.
+     * The inquiry involves complaints, negative feedback, or ambiguous questions not in the knowledge base.
 
 APPROVED ABENZO KNOWLEDGE BASE (PACKAGES, SERVICES, PORTFOLIO, FAQS, CONTACT):
 {knowledge_context}
@@ -388,7 +415,7 @@ Return ONLY a valid JSON object matching:
   "ai_draft": "Your suggested polite, concise reply text quoting only approved info",
   "reasoning": "Why this reply is suggested and how it aligns with verified facts",
   "lead_temperature": "early|qualified|ready_for_human",
-  "needs_human_decision": true,
+  "needs_human_decision": false,
   "matched_faq_question": "string or null",
   "source_references": ["List of package or page sources used, e.g. https://abenzo.co.in/llms.txt"]
 }}

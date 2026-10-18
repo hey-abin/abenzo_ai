@@ -238,11 +238,19 @@ async def receive_meta_webhook(
             # 1. Direct messages
             messaging = entry.get("messaging", [])
             for msg_event in messaging:
+                # Discard outbound echoes sent by our page/agents
+                if msg_event.get("message", {}).get("is_echo"):
+                    continue
+
                 sender_id = msg_event.get("sender", {}).get("id")
                 mid = msg_event.get("message", {}).get("mid")
                 text = msg_event.get("message", {}).get("text")
 
-                if not mid or not text:
+                if not mid or not text or not sender_id:
+                    continue
+
+                # Ignore messages from our own business account ID
+                if sender_id == "29266079986333250" or sender_id == settings.effective_instagram_app_id:
                     continue
 
                 # Deduplication
@@ -258,7 +266,6 @@ async def receive_meta_webhook(
                     cursor.execute("""
                         UPDATE conversations SET
                             last_message_at = ?,
-                            needs_human = 1,
                             recipient_id = ?,
                             updated_at = ?
                         WHERE id = ?
@@ -272,26 +279,106 @@ async def receive_meta_webhook(
                     """, (sender_id, sender_id, f"IG User ({sender_id[:8]})", now, now))
                     conv_id = cursor.lastrowid
 
-                # Generate AI draft response via Ollama
+                # Fetch recent conversation context (last 4 events)
+                cursor.execute("""
+                    SELECT direction, message_text, approved_text, ai_draft
+                    FROM conversation_events
+                    WHERE conversation_id = ?
+                    ORDER BY id DESC LIMIT 4
+                """, (conv_id,))
+                recent_rows = cursor.fetchall()
+                conv_history = []
+                for r in reversed(recent_rows):
+                    if r["direction"] == "inbound":
+                        conv_history.append({"role": "user", "content": r["message_text"]})
+                    else:
+                        c = r["approved_text"] or r["ai_draft"]
+                        if c:
+                            conv_history.append({"role": "assistant", "content": c})
+
+                # Generate AI draft response grounded in Abenzo Knowledge Base
                 ai_draft = ""
                 lead_temp = "early"
+                needs_human = True
                 try:
-                    draft_res = await draft_inbound_response_with_ai(text, [], agency_profile)
-                    ai_draft = draft_res.get("ai_draft", "")
+                    draft_res = await draft_inbound_response_with_ai(text, conv_history, agency_profile)
+                    ai_draft = (draft_res.get("ai_draft") or "").strip()
                     lead_temp = draft_res.get("lead_temperature", "early")
+                    needs_human = bool(draft_res.get("needs_human_decision", True))
                 except Exception:
                     ai_draft = "Hi! Thank you for reaching out to Abenzo. A team member will follow up shortly."
+                    needs_human = True
 
-                cursor.execute("""
-                    INSERT INTO conversation_events (
-                        conversation_id, external_event_id, event_type, direction,
-                        message_text, ai_draft, approved_text, delivery_status, created_at
-                    ) VALUES (?, ?, 'dm', 'inbound', ?, ?, '', 'draft_pending', ?)
-                """, (conv_id, mid, text, ai_draft, now))
+                # Determine if eligible for automated outbound dispatch:
+                # - High-confidence, routine response grounded in approved knowledge (needs_human is False)
+                # - Real inbound recipient within the Meta 24h messaging window
+                # - Instagram access token configured
+                is_auto_reply_eligible = (
+                    bool(ai_draft) and
+                    not needs_human and
+                    bool(settings.effective_instagram_token) and
+                    not sender_id.startswith("sample_") and
+                    not sender_id.startswith("manual_") and
+                    sender_id != "29266079986333250"
+                )
 
-                cursor.execute("""
-                    UPDATE conversations SET lead_temperature = ? WHERE id = ?
-                """, (lead_temp, conv_id))
+                if is_auto_reply_eligible:
+                    # Dispatched directly to genuine inbound user via official Instagram Graph API
+                    dispatch_res = await dispatch_instagram_dm(sender_id, ai_draft)
+                    if dispatch_res.get("success"):
+                        meta_mid = dispatch_res.get("meta_message_id", "")
+                        cursor.execute("""
+                            INSERT INTO conversation_events (
+                                conversation_id, external_event_id, event_type, direction,
+                                message_text, ai_draft, approved_text, delivery_status,
+                                meta_message_id, sent_at, created_at
+                            ) VALUES (?, ?, 'dm', 'inbound', ?, ?, ?, 'sent', ?, ?, ?)
+                        """, (conv_id, mid, text, ai_draft, ai_draft, meta_mid, now, now))
+
+                        cursor.execute("""
+                            UPDATE conversations SET
+                                needs_human = 0,
+                                lead_temperature = ?,
+                                last_message_at = ?,
+                                updated_at = ?
+                            WHERE id = ?
+                        """, (lead_temp, now, now, conv_id))
+                    else:
+                        err = dispatch_res.get("error_details", "")
+                        cursor.execute("""
+                            INSERT INTO conversation_events (
+                                conversation_id, external_event_id, event_type, direction,
+                                message_text, ai_draft, approved_text, delivery_status,
+                                error_details, created_at
+                            ) VALUES (?, ?, 'dm', 'inbound', ?, ?, ?, 'failed', ?, ?)
+                        """, (conv_id, mid, text, ai_draft, ai_draft, err, now))
+
+                        cursor.execute("""
+                            UPDATE conversations SET
+                                needs_human = 1,
+                                lead_temperature = ?,
+                                last_message_at = ?,
+                                updated_at = ?
+                            WHERE id = ?
+                        """, (lead_temp, now, now, conv_id))
+                else:
+                    # Flag for human review: uncertain question, complaint, or complex scope/pricing
+                    cursor.execute("""
+                        INSERT INTO conversation_events (
+                            conversation_id, external_event_id, event_type, direction,
+                            message_text, ai_draft, approved_text, delivery_status, created_at
+                        ) VALUES (?, ?, 'dm', 'inbound', ?, ?, '', 'draft_pending', ?)
+                    """, (conv_id, mid, text, ai_draft, now))
+
+                    cursor.execute("""
+                        UPDATE conversations SET
+                            needs_human = 1,
+                            lead_temperature = ?,
+                            last_message_at = ?,
+                            updated_at = ?
+                        WHERE id = ?
+                    """, (lead_temp, now, now, conv_id))
+
                 processed_count += 1
 
         conn.commit()

@@ -129,6 +129,122 @@ def test_webhook_idempotency():
     assert resp2.status_code == 200
     assert resp2.json()["events_processed"] == 0
 
+def test_inbound_webhook_auto_reply_flow(monkeypatch):
+    """
+    Verifies the complete inbound-to-outbound reply workflow:
+    1. Routine high-confidence inquiry dispatches automatically via Meta Graph API and sets delivery_status='sent'.
+    2. Uncertain or complex inquiry sets delivery_status='draft_pending' and needs_human=1.
+    3. Outbound echo messages are ignored.
+    """
+    dispatched_calls = []
+
+    async def mock_dispatch(recipient_id, text):
+        dispatched_calls.append({"recipient_id": recipient_id, "text": text})
+        return {"success": True, "meta_message_id": f"mid_auto_{len(dispatched_calls)}", "error_details": ""}
+
+    monkeypatch.setattr("backend.app.routers.meta.dispatch_instagram_dm", mock_dispatch)
+    monkeypatch.setattr("backend.app.config.settings.META_ACCESS_TOKEN", "test_ig_token_abc")
+
+    # 1. Echo message should be discarded
+    echo_payload = {
+        "entry": [{
+            "messaging": [{
+                "sender": {"id": "ig_user_auto_1"},
+                "message": {
+                    "mid": "mid_echo_001",
+                    "text": "Outbound echo message",
+                    "is_echo": True
+                }
+            }]
+        }]
+    }
+    resp_echo = client.post("/api/meta/webhook", json=echo_payload)
+    assert resp_echo.status_code == 200
+    assert resp_echo.json()["events_processed"] == 0
+    assert len(dispatched_calls) == 0
+
+    # 2. Routine high-confidence inquiry
+    async def mock_draft_routine(incoming, history, profile):
+        return {
+            "ai_draft": "Abenzo Starter Package starts at ₹15,000+ for 3-5 pages.",
+            "reasoning": "Standard FAQ response.",
+            "lead_temperature": "qualified",
+            "needs_human_decision": False,
+            "matched_faq_question": "What are your prices?",
+            "source_references": ["https://abenzo.in/pricing"]
+        }
+
+    monkeypatch.setattr("backend.app.routers.meta.draft_inbound_response_with_ai", mock_draft_routine)
+
+    routine_payload = {
+        "entry": [{
+            "messaging": [{
+                "sender": {"id": "ig_user_auto_routine_1"},
+                "message": {
+                    "mid": "mid_auto_routine_001",
+                    "text": "What is the price for a starter website?"
+                }
+            }]
+        }]
+    }
+    resp_routine = client.post("/api/meta/webhook", json=routine_payload)
+    assert resp_routine.status_code == 200
+    assert resp_routine.json()["events_processed"] == 1
+    assert len(dispatched_calls) == 1
+    assert dispatched_calls[0]["recipient_id"] == "ig_user_auto_routine_1"
+
+    # Verify event and conversation in DB
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM conversation_events WHERE external_event_id = 'mid_auto_routine_001'")
+        ev = dict(cursor.fetchone())
+        assert ev["delivery_status"] == "sent"
+        assert ev["meta_message_id"] == "mid_auto_1"
+        assert ev["approved_text"] == "Abenzo Starter Package starts at ₹15,000+ for 3-5 pages."
+
+        cursor.execute("SELECT needs_human FROM conversations WHERE external_thread_id = 'ig_user_auto_routine_1'")
+        assert cursor.fetchone()["needs_human"] == 0
+
+    # 3. Complex inquiry requiring human decision
+    async def mock_draft_complex(incoming, history, profile):
+        return {
+            "ai_draft": "Hi! We'd love to learn more about your custom enterprise architecture.",
+            "reasoning": "Custom quote required.",
+            "lead_temperature": "ready_for_human",
+            "needs_human_decision": True,
+            "matched_faq_question": None,
+            "source_references": []
+        }
+
+    monkeypatch.setattr("backend.app.routers.meta.draft_inbound_response_with_ai", mock_draft_complex)
+
+    complex_payload = {
+        "entry": [{
+            "messaging": [{
+                "sender": {"id": "ig_user_auto_complex_1"},
+                "message": {
+                    "mid": "mid_auto_complex_001",
+                    "text": "Can you build a high-frequency trading web portal with custom hardware integration for $200?"
+                }
+            }]
+        }]
+    }
+    resp_complex = client.post("/api/meta/webhook", json=complex_payload)
+    assert resp_complex.status_code == 200
+    assert resp_complex.json()["events_processed"] == 1
+    # Dispatch count must NOT have increased
+    assert len(dispatched_calls) == 1
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM conversation_events WHERE external_event_id = 'mid_auto_complex_001'")
+        ev = dict(cursor.fetchone())
+        assert ev["delivery_status"] == "draft_pending"
+        assert ev["approved_text"] == ""
+
+        cursor.execute("SELECT needs_human FROM conversations WHERE external_thread_id = 'ig_user_auto_complex_1'")
+        assert cursor.fetchone()["needs_human"] == 1
+
 def test_human_approval_rule_for_inbox():
     # Create sample conversation
     sample_resp = client.post("/api/inbox/sample-conversation")
