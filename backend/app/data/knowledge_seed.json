@@ -1,0 +1,182 @@
+[
+  {
+    "category": "package",
+    "title": "Starter Package (₹15,000+)",
+    "content": "Starting Price: ₹15,000+\nInclusions: 3–5 pages, responsive design, WhatsApp integration, basic SEO, deployment\nScope Note: Final pricing depends strictly on project requirements and scope.",
+    "source_url": "https://abenzo.vercel.app/llms.txt",
+    "retrieval_time": "2026-10-17T23:26:55.617796",
+    "verification_status": "approved",
+    "raw_metadata": "{\"package_name\": \"Starter Package\", \"starting_price\": \"\\u20b915,000+\", \"inclusions\": \"3\\u20135 pages, responsive design, WhatsApp integration, basic SEO, deployment\"}"
+  },
+  {
+    "category": "package",
+    "title": "Business Package (₹30,000+)",
+    "content": "Starting Price: ₹30,000+\nInclusions: 5–10 pages, custom UI/UX, contact/lead capture, analytics, SEO\nScope Note: Final pricing depends strictly on project requirements and scope.",
+    "source_url": "https://abenzo.vercel.app/llms.txt",
+    "retrieval_time": "2026-10-17T23:26:55.617796",
+    "verification_status": "approved",
+    "raw_metadata": "{\"package_name\": \"Business Package\", \"starting_price\": \"\\u20b930,000+\", \"inclusions\": \"5\\u201310 pages, custom UI/UX, contact/lead capture, analytics, SEO\"}"
+  },
+  {
+    "category": "package",
+    "title": "Professional Package (₹50,000+)",
+    "content": "Starting Price: ₹50,000+\nInclusions: Custom UI/UX, advanced animations, database, authentication, API integrations\nScope Note: Final pricing depends strictly on project requirements and scope.",
+    "source_url": "https://abenzo.vercel.app/llms.txt",
+    "retrieval_time": "2026-10-17T23:26:55.617796",
+    "verification_status": "approved",
+    "raw_metadata": "{\"package_name\": \"Professional Package\", \"starting_price\": \"\\u20b950,000+\", \"inclusions\": \"Custom UI/UX, advanced animations, database, authentication, API integrations\"}"
+  },
+  {
+    "category": "package",
+    "title": "Custom Software / SaaS (₹75,000+)",
+    "content": "Starting Price: ₹75,000+\nInclusions: Tailored SaaS, CRM, booking systems, dashboards, automation\nScope Note: Final pricing depends strictly on project requirements and scope.",
+    "source_url": "https://abenzo.vercel.app/llms.txt",
+    "retrieval_time": "2026-10-17T23:26:55.617796",
+    "verification_status": "approved",
+    "raw_metadata": "{\"package_name\": \"Custom Software / SaaS\", \"starting_price\": \"\\u20b975,000+\", \"inclusions\": \"Tailored SaaS, CRM, booking systems, dashboards, automation\"}"
+  },
+  {
+    "category": "service",
+    "title": "Custom Web Development",
+    "content": "Description: Bespoke business websites engineered with clean semantic code, sub-second response times, mobile responsiveness, and technical SEO foundation.\nService URL: https://abenzo.co.in/services/web-development",
+    "source_url": "https://abenzo.vercel.app/llms.txt",
+    "retrieval_time": "2026-10-17T23:26:55.617796",
+    "verification_status": "approved",
+    "raw_metadata": "{\"service_name\": \"Custom Web Development\", \"url\": \"https://abenzo.co.in/services/web-development\"}"
+  },
+  {
+    "category": "service",
+    "title": "3D Web Development",
+    "content": "Description: Interactive 3D web applications and immersive browser graphics utilizing Three.js, React Three Fiber, WebGL, and custom shader pipelines.\nService URL: https://abenzo.co.in/services/3d-web-development",
+    "source_url": "https://abenzo.vercel.app/llms.txt",
+    "retrieval_time": "2026-10-17T23:26:55.617796",
+    "verification_status": "approved",
+    "raw_metadata": "{\"service_name\": \"3D Web Development\", \"url\": \"https://abenzo.co.in/services/3d-web-development\"}"
+  },
+  {
+    "category": "service",
+    "title": "UI/UX Design & Website Redesign",
+    "content": "Description: Modern design systems, user journey mapping, high-fidelity prototypes, and complete visual redesigns aimed at increasing conversion rates.\nService URL: https://abenzo.co.in/services/ui-ux-design",
+    "source_url": "https://abenzo.vercel.app/llms.txt",
+    "retrieval_time": "2026-10-17T23:26:55.617796",
+    "verification_status": "approved",
+    "raw_metadata": "{\"service_name\": \"UI/UX Design & Website Redesign\", \"url\": \"https://abenzo.co.in/services/ui-ux-design\"}"
+  },
+  {
+    "category": "service",
+    "title": "Commerce Development",
+    "content": "Description: Custom e-commerce architectures, friction-free checkout workflows, secure payment gateways (Razorpay, Stripe), and inventory synchronization.\nService URL: https://abenzo.co.in/services/ecommerce-development",
+    "source_url": "https://abenzo.vercel.app/llms.txt",
+    "retrieval_time": "2026-10-17T23:26:55.617796",
+    "verification_status": "approved",
+    "raw_metadata": "{\"service_name\": \"Commerce Development\", \"url\": \"https://abenzo.co.in/services/ecommerce-development\"}"
+  },
+  {
+    "category": "service",
+    "title": "Shopify Development",
+    "content": "Description: Custom Shopify theme design, Liquid development, store setup, third-party app integrations, and mobile commerce optimization.\nService URL: https://abenzo.co.in/services/shopify-development",
+    "source_url": "https://abenzo.vercel.app/llms.txt",
+    "retrieval_time": "2026-10-17T23:26:55.617796",
+    "verification_status": "approved",
+    "raw_metadata": "{\"service_name\": \"Shopify Development\", \"url\": \"https://abenzo.co.in/services/shopify-development\"}"
+  },
+  {
+    "category": "service",
+    "title": "SaaS & Web App Development",
+    "content": "Description: Full-stack web applications, minimum viable products (MVPs), multi-tenant cloud platforms, dashboards, and internal business tools.\nService URL: https://abenzo.co.in/services/saas-development",
+    "source_url": "https://abenzo.vercel.app/llms.txt",
+    "retrieval_time": "2026-10-17T23:26:55.617796",
+    "verification_status": "approved",
+    "raw_metadata": "{\"service_name\": \"SaaS & Web App Development\", \"url\": \"https://abenzo.co.in/services/saas-development\"}"
+  },
+  {
+    "category": "service",
+    "title": "Full Portfolio",
+    "content": "Description: ## Pricing Model & Engagement\nService URL: https://abenzo.co.in/work",
+    "source_url": "https://abenzo.vercel.app/llms.txt",
+    "retrieval_time": "2026-10-17T23:26:55.617796",
+    "verification_status": "approved",
+    "raw_metadata": "{\"service_name\": \"Full Portfolio\", \"url\": \"https://abenzo.co.in/work\"}"
+  },
+  {
+    "category": "portfolio",
+    "title": "Project: PetLink",
+    "content": "URL: https://petlinkk.vercel.app\nSummary: AI-powered pet matchmaking, health tracking, and adoption ecosystem built with Next.js, Firebase, MongoDB, and Gemini AI.",
+    "source_url": "https://abenzo.vercel.app/llms.txt",
+    "retrieval_time": "2026-10-17T23:26:55.617796",
+    "verification_status": "approved",
+    "raw_metadata": "{\"project_name\": \"PetLink\", \"url\": \"https://petlinkk.vercel.app\"}"
+  },
+  {
+    "category": "portfolio",
+    "title": "Project: My Coco",
+    "content": "URL: https://mycocopet.vercel.app\nSummary: Immersive 3D interactive web game demonstrating real-time browser physics and 3D graphics built with React Three Fiber, Three.js, and Next.js.",
+    "source_url": "https://abenzo.vercel.app/llms.txt",
+    "retrieval_time": "2026-10-17T23:26:55.617796",
+    "verification_status": "approved",
+    "raw_metadata": "{\"project_name\": \"My Coco\", \"url\": \"https://mycocopet.vercel.app\"}"
+  },
+  {
+    "category": "contact",
+    "title": "Abenzo Contact & Headquarters",
+    "content": "Headquarters: India (Kerala)\nPrimary Contact (WhatsApp): +91 85908 14463 (https://wa.me/918590814463)\nEmail: abenzo.co.in@gmail.com",
+    "source_url": "https://abenzo.vercel.app/llms.txt",
+    "retrieval_time": "2026-10-17T23:26:55.617796",
+    "verification_status": "approved",
+    "raw_metadata": "{\"contact_summary\": [\"Headquarters: India (Kerala)\", \"Primary Contact (WhatsApp): +91 85908 14463 (https://wa.me/918590814463)\", \"Email: abenzo.co.in@gmail.com\"]}"
+  },
+  {
+    "category": "process",
+    "title": "Abenzo Project Process (How It Works)",
+    "content": "Step 1: Tell Us Your Idea — Share your requirements, target audience, and business goals.\nStep 2: Get a Clear Proposal — Receive a detailed project proposal with scope, timeline, and transparent pricing.\nStep 3: We Design & Build — Iterative development with regular progress updates and milestone previews.\nStep 4: Launch & Support — Deployment, domain setup, SEO optimization, and post-launch technical support.",
+    "source_url": "https://abenzo.vercel.app/",
+    "retrieval_time": "2026-10-17T23:26:55.682592",
+    "verification_status": "approved",
+    "raw_metadata": "{\"steps\": [\"Step 1: Tell Us Your Idea \\u2014 Share your requirements, target audience, and business goals.\", \"Step 2: Get a Clear Proposal \\u2014 Receive a detailed project proposal with scope, timeline, and transparent pricing.\", \"Step 3: We Design & Build \\u2014 Iterative development with regular progress updates and milestone previews.\", \"Step 4: Launch & Support \\u2014 Deployment, domain setup, SEO optimization, and post-launch technical support.\"]}"
+  },
+  {
+    "category": "faq",
+    "title": "FAQ: How much does a website cost?",
+    "content": "Question: How much does a website cost?\nAnswer: Abenzo offers transparent starting tiers: Starter Package starting at ₹15,000+, Business Package at ₹30,000+, Professional at ₹50,000+, and Custom Software at ₹75,000+. Final pricing depends strictly on project requirements, features, and scope.",
+    "source_url": "https://abenzo.vercel.app/",
+    "retrieval_time": "2026-10-17T23:26:55.682592",
+    "verification_status": "approved",
+    "raw_metadata": "{\"q\": \"How much does a website cost?\", \"a\": \"Abenzo offers transparent starting tiers: Starter Package starting at \\u20b915,000+, Business Package at \\u20b930,000+, Professional at \\u20b950,000+, and Custom Software at \\u20b975,000+. Final pricing depends strictly on project requirements, features, and scope.\"}"
+  },
+  {
+    "category": "faq",
+    "title": "FAQ: How long does a website take to build?",
+    "content": "Question: How long does a website take to build?\nAnswer: Standard websites typically take 1 to 3 weeks depending on the package and scope. Custom web applications and SaaS platforms require 4 to 8+ weeks. Specific timelines are confirmed during the proposal phase.",
+    "source_url": "https://abenzo.vercel.app/",
+    "retrieval_time": "2026-10-17T23:26:55.682592",
+    "verification_status": "approved",
+    "raw_metadata": "{\"q\": \"How long does a website take to build?\", \"a\": \"Standard websites typically take 1 to 3 weeks depending on the package and scope. Custom web applications and SaaS platforms require 4 to 8+ weeks. Specific timelines are confirmed during the proposal phase.\"}"
+  },
+  {
+    "category": "faq",
+    "title": "FAQ: Do you work with businesses outside India?",
+    "content": "Question: Do you work with businesses outside India?\nAnswer: Yes. Abenzo is based in Kerala, India and serves clients across India as well as the US, UK, UAE, Canada, Australia, and worldwide.",
+    "source_url": "https://abenzo.vercel.app/",
+    "retrieval_time": "2026-10-17T23:26:55.682592",
+    "verification_status": "approved",
+    "raw_metadata": "{\"q\": \"Do you work with businesses outside India?\", \"a\": \"Yes. Abenzo is based in Kerala, India and serves clients across India as well as the US, UK, UAE, Canada, Australia, and worldwide.\"}"
+  },
+  {
+    "category": "faq",
+    "title": "FAQ: Do you provide maintenance and post-launch support?",
+    "content": "Question: Do you provide maintenance and post-launch support?\nAnswer: Yes, every website comes with post-launch support, domain/hosting guidance, bug fixes, and optional ongoing maintenance retainers.",
+    "source_url": "https://abenzo.vercel.app/",
+    "retrieval_time": "2026-10-17T23:26:55.682592",
+    "verification_status": "approved",
+    "raw_metadata": "{\"q\": \"Do you provide maintenance and post-launch support?\", \"a\": \"Yes, every website comes with post-launch support, domain/hosting guidance, bug fixes, and optional ongoing maintenance retainers.\"}"
+  },
+  {
+    "category": "faq",
+    "title": "FAQ: Can you integrate payment gateways and WhatsApp ordering?",
+    "content": "Question: Can you integrate payment gateways and WhatsApp ordering?\nAnswer: Yes. Abenzo integrates Razorpay, Stripe, WhatsApp ordering buttons, and custom e-commerce checkout workflows.",
+    "source_url": "https://abenzo.vercel.app/",
+    "retrieval_time": "2026-10-17T23:26:55.682592",
+    "verification_status": "approved",
+    "raw_metadata": "{\"q\": \"Can you integrate payment gateways and WhatsApp ordering?\", \"a\": \"Yes. Abenzo integrates Razorpay, Stripe, WhatsApp ordering buttons, and custom e-commerce checkout workflows.\"}"
+  }
+]

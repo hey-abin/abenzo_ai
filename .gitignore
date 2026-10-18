@@ -1,0 +1,52 @@
+# Environment variables & secrets
+.env
+.env.*
+.env*.local
+backend/.env
+backend/.env.*
+frontend/.env
+frontend/.env.*
+frontend/.env*.local
+env_backups/
+.neon
+.neon/
+
+# Allow committed documentation templates
+!backend/.env.example
+!backend/.env.production.example
+!frontend/.env.example
+
+# Python & testing
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+backend/venv/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Databases & backups
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+backend/*.db
+backend/backups/
+
+# Node & Next.js
+node_modules/
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/build/
+.next/
+
+# Operating System & Credentials
+.DS_Store
+Thumbs.db
+*.pem
+*.key
+*.cert

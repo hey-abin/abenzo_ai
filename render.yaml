@@ -1,0 +1,80 @@
+services:
+  # ==========================================
+  # Abenzo AI - FastAPI Backend Service
+  # ==========================================
+  - type: web
+    name: abenzo-backend
+    runtime: python
+    plan: free
+    region: singapore
+    buildCommand: pip install -r backend/requirements.txt
+    startCommand: uvicorn backend.app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api
+    autoDeploy: false
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: DEBUG
+        value: "False"
+
+      # Database Configuration
+      # When DATABASE_URL is set (from Render secret environment), Neon PostgreSQL is used.
+      # If unset, defaults to local SQLite DB_PATH.
+      - key: DATABASE_URL
+        sync: false
+      - key: DB_PATH
+        value: backend/abenzo.db
+
+      # AI Provider settings
+      # For Render deployment, hosted OpenAI-compatible provider is recommended (e.g., Groq, Together, OpenAI)
+      - key: AI_PROVIDER
+        value: openai_compatible
+      - key: AI_BASE_URL
+        value: https://api.groq.com/openai/v1
+      - key: AI_MODEL
+        value: llama-3.1-8b-instant
+      - key: AI_API_KEY
+        sync: false
+      - key: AI_TIMEOUT_SECONDS
+        value: "30"
+
+      # CORS Allowed Origins
+      # Set to your frontend deployment URL (e.g. https://abenzo-frontend.onrender.com)
+      - key: CORS_ORIGINS
+        sync: false
+
+      # Meta Instagram Webhook & API Credentials (Set in Render Dashboard Secrets)
+      - key: META_VERIFY_TOKEN
+        generateValue: true
+      - key: META_APP_ID
+        sync: false
+      - key: META_APP_SECRET
+        sync: false
+      - key: META_ACCESS_TOKEN
+        sync: false
+      - key: META_PAGE_ID
+        sync: false
+      - key: INSTAGRAM_ACCESS_TOKEN
+        sync: false
+      - key: INSTAGRAM_APP_ID
+        sync: false
+      - key: INSTAGRAM_APP_SECRET
+        sync: false
+
+  # ==========================================
+  # Abenzo AI - Next.js Frontend Service
+  # ==========================================
+  - type: web
+    name: abenzo-frontend
+    runtime: node
+    plan: free
+    region: singapore
+    buildCommand: cd frontend && npm install && npm run build
+    startCommand: cd frontend && npm start
+    autoDeploy: false
+    envVars:
+      - key: NODE_VERSION
+        value: 20.18.0
+      - key: NEXT_PUBLIC_API_URL
+        # Set to your Render backend web service URL (e.g., https://abenzo-backend.onrender.com/api)
+        sync: false
