@@ -43,6 +43,19 @@ services:
       - key: CORS_ORIGINS
         sync: false
 
+      # Search Provider Configuration
+      # When primary DuckDuckGo search is rate-limited on datacenter IPs, secondary APIs can be configured:
+      - key: SEARCH_PROVIDER
+        value: "auto"
+      - key: SERPER_API_KEY
+        sync: false
+      - key: TAVILY_API_KEY
+        sync: false
+      - key: BRAVE_SEARCH_API_KEY
+        sync: false
+      - key: SERPAPI_API_KEY
+        sync: false
+
       # Meta Instagram Webhook & API Credentials (Set in Render Dashboard Secrets)
       - key: META_VERIFY_TOKEN
         generateValue: true
