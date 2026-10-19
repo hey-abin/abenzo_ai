@@ -151,13 +151,22 @@ class PgConnectionWrapper:
         return PgCursorWrapper(cur)
 
     def commit(self):
-        self._conn.commit()
+        if not getattr(self._conn, "closed", False):
+            self._conn.commit()
 
     def rollback(self):
-        self._conn.rollback()
+        try:
+            if not getattr(self._conn, "closed", False):
+                self._conn.rollback()
+        except Exception:
+            pass
 
     def close(self):
-        self._conn.close()
+        try:
+            if not getattr(self._conn, "closed", False):
+                self._conn.close()
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -184,10 +193,17 @@ def get_db(db_path: str = None):
         yield conn
         conn.commit()
     except Exception:
-        conn.rollback()
+        try:
+            conn.rollback()
+        except Exception:
+            # Ensure connection termination or rollback failure does not mask the original exception
+            pass
         raise
     finally:
-        conn.close()
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------

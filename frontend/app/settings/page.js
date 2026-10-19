@@ -13,7 +13,8 @@ import {
   Plus, 
   Trash2,
   Shield,
-  HelpCircle
+  HelpCircle,
+  Sparkles
 } from "lucide-react";
 import InstagramIcon from "@/components/InstagramIcon";
 import { 

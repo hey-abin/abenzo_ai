@@ -1,6 +1,7 @@
 import hmac
 import hashlib
 import json
+import logging
 import uuid
 from datetime import datetime
 from typing import Dict, Any, List, Optional
@@ -11,6 +12,8 @@ from backend.app.config import settings
 from backend.app.database import get_db
 from backend.app.schemas import MetaStatus, SendReplyRequest, SendReplyResponse
 from backend.app.services.ollama_service import draft_inbound_response_with_ai
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/meta", tags=["meta"])
 
@@ -224,118 +227,146 @@ async def receive_meta_webhook(
 
     entries = data.get("entry", [])
     processed_count = 0
+    now = datetime.now().isoformat()
+    own_ids = {"29266079986333250", "17841428389805643", settings.effective_instagram_app_id}
 
-    with get_db() as conn:
-        cursor = conn.cursor()
-        now = datetime.now().isoformat()
+    # Step 1: Short read transaction: load business profile
+    agency_profile = {}
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT value FROM app_settings WHERE key = 'business_profile'")
+            prof_row = cursor.fetchone()
+            if prof_row:
+                agency_profile = json.loads(prof_row["value"])
+    except Exception as e:
+        logger.warning("Could not load business profile in webhook handler: %s", type(e).__name__)
+        agency_profile = {}
 
-        # Load Abenzo business profile for AI drafting
-        cursor.execute("SELECT value FROM app_settings WHERE key = 'business_profile'")
-        prof_row = cursor.fetchone()
-        agency_profile = json.loads(prof_row["value"]) if prof_row else {}
+    auto_reply_enabled = bool(agency_profile.get("auto_reply_faq_enabled", False))
 
-        own_ids = {"29266079986333250", "17841428389805643", settings.effective_instagram_app_id}
-        auto_reply_enabled = bool(agency_profile.get("auto_reply_faq_enabled", False))
+    # Step 2: Extract all inbound message events across entries
+    raw_messaging = []
+    for entry in entries:
+        raw_messaging.extend(entry.get("messaging", []))
+        for change in entry.get("changes", []):
+            val = change.get("value", {})
+            if isinstance(val, dict) and ("message" in val or "messages" in val):
+                raw_messaging.append(val)
 
-        for entry in entries:
-            # Support both direct messaging array and changes-based webhook payloads
-            raw_messaging = list(entry.get("messaging", []))
-            for change in entry.get("changes", []):
-                val = change.get("value", {})
-                if isinstance(val, dict) and ("message" in val or "messages" in val):
-                    raw_messaging.append(val)
+    # Step 3: Process each message event with short, isolated database transactions
+    for msg_event in raw_messaging:
+        # Discard outbound echoes sent by our page/agents
+        if msg_event.get("message", {}).get("is_echo"):
+            continue
 
-            for msg_event in raw_messaging:
-                # Discard outbound echoes sent by our page/agents
-                if msg_event.get("message", {}).get("is_echo"):
-                    continue
+        sender_id = msg_event.get("sender", {}).get("id")
+        mid = msg_event.get("message", {}).get("mid")
+        text = (msg_event.get("message", {}).get("text") or 
+                (msg_event.get("message", {}).get("attachments") and "[Media / Attachment]") or "").strip()
 
-                sender_id = msg_event.get("sender", {}).get("id")
-                mid = msg_event.get("message", {}).get("mid")
-                text = (msg_event.get("message", {}).get("text") or 
-                        (msg_event.get("message", {}).get("attachments") and "[Media / Attachment]") or "").strip()
+        if not mid or not text or not sender_id or sender_id in own_ids:
+            continue
 
-                if not mid or not text or not sender_id:
-                    continue
+        # Step 3a: Read/Prepare Conversation (Short DB Transaction)
+        conv_id = None
+        conv_history = []
+        is_duplicate = False
 
-                # Ignore messages from our own business account ID
-                if sender_id in own_ids:
-                    continue
+        try:
+            with get_db() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT id FROM conversation_events WHERE external_event_id = ?", (mid,))
+                if cursor.fetchone():
+                    is_duplicate = True
+                else:
+                    # Find or create conversation
+                    cursor.execute("SELECT id FROM conversations WHERE external_thread_id = ?", (sender_id,))
+                    conv = cursor.fetchone()
+                    if conv:
+                        conv_id = conv["id"]
+                        cursor.execute("""
+                            UPDATE conversations SET
+                                last_message_at = ?,
+                                recipient_id = ?,
+                                updated_at = ?
+                            WHERE id = ?
+                        """, (now, sender_id, now, conv_id))
+                    else:
+                        cursor.execute("""
+                            INSERT INTO conversations (
+                                platform, external_thread_id, recipient_id, contact_display_name,
+                                status, needs_human, lead_temperature, notes, created_at, updated_at
+                            ) VALUES ('instagram', ?, ?, ?, 'active', 1, 'early', 'Inbound Instagram DM via Official Webhook', ?, ?)
+                        """, (sender_id, sender_id, f"IG User ({sender_id[:8]})", now, now))
+                        conv_id = cursor.lastrowid
 
-                # Deduplication
+                    # Fetch recent conversation context (last 4 events)
+                    cursor.execute("""
+                        SELECT direction, message_text, approved_text, ai_draft
+                        FROM conversation_events
+                        WHERE conversation_id = ?
+                        ORDER BY id DESC LIMIT 4
+                    """, (conv_id,))
+                    recent_rows = cursor.fetchall()
+                    for r in reversed(recent_rows):
+                        if r["direction"] == "inbound":
+                            conv_history.append({"role": "user", "content": r["message_text"]})
+                        else:
+                            c = r["approved_text"] or r["ai_draft"]
+                            if c:
+                                conv_history.append({"role": "assistant", "content": c})
+        except Exception as e:
+            logger.error("Database error during conversation lookup for mid %s: %s", mid, type(e).__name__)
+            continue
+
+        if is_duplicate or not conv_id:
+            continue
+
+        # Step 3b: Slow AI Draft Generation (OUTSIDE Database Transaction)
+        ai_draft = ""
+        lead_temp = "early"
+        needs_human = True
+        try:
+            draft_res = await draft_inbound_response_with_ai(text, conv_history, agency_profile)
+            ai_draft = (draft_res.get("ai_draft") or "").strip()
+            lead_temp = draft_res.get("lead_temperature", "early")
+            needs_human = bool(draft_res.get("needs_human_decision", True))
+        except Exception as e:
+            logger.warning("AI draft failed for mid %s: %s", mid, type(e).__name__)
+            ai_draft = "Hi! Thank you for reaching out to Abenzo. A team member will follow up shortly."
+            needs_human = True
+
+        # Determine if eligible for automated outbound dispatch
+        is_auto_reply_eligible = (
+            auto_reply_enabled and
+            bool(ai_draft) and
+            not needs_human and
+            bool(settings.effective_instagram_token) and
+            not sender_id.startswith("sample_") and
+            not sender_id.startswith("manual_") and
+            sender_id not in own_ids
+        )
+
+        # Step 3c: Outbound Instagram Message Dispatch (OUTSIDE Database Transaction)
+        dispatch_res = None
+        if is_auto_reply_eligible:
+            try:
+                dispatch_res = await dispatch_instagram_dm(sender_id, ai_draft)
+            except Exception as e:
+                logger.error("Outbound dispatch failed for mid %s: %s", mid, type(e).__name__)
+                dispatch_res = {"success": False, "error_details": f"Dispatch error: {type(e).__name__}"}
+
+        # Step 3d: Write Conversation Event & Update Status (Short DB Transaction)
+        try:
+            with get_db() as conn:
+                cursor = conn.cursor()
+                # Re-check deduplication before write
                 cursor.execute("SELECT id FROM conversation_events WHERE external_event_id = ?", (mid,))
                 if cursor.fetchone():
                     continue
 
-                # Find or create conversation
-                cursor.execute("SELECT id FROM conversations WHERE external_thread_id = ?", (sender_id,))
-                conv = cursor.fetchone()
-                if conv:
-                    conv_id = conv["id"]
-                    cursor.execute("""
-                        UPDATE conversations SET
-                            last_message_at = ?,
-                            recipient_id = ?,
-                            updated_at = ?
-                        WHERE id = ?
-                    """, (now, sender_id, now, conv_id))
-                else:
-                    cursor.execute("""
-                        INSERT INTO conversations (
-                            platform, external_thread_id, recipient_id, contact_display_name,
-                            status, needs_human, lead_temperature, notes, created_at, updated_at
-                        ) VALUES ('instagram', ?, ?, ?, 'active', 1, 'early', 'Inbound Instagram DM via Official Webhook', ?, ?)
-                    """, (sender_id, sender_id, f"IG User ({sender_id[:8]})", now, now))
-                    conv_id = cursor.lastrowid
-
-                # Fetch recent conversation context (last 4 events)
-                cursor.execute("""
-                    SELECT direction, message_text, approved_text, ai_draft
-                    FROM conversation_events
-                    WHERE conversation_id = ?
-                    ORDER BY id DESC LIMIT 4
-                """, (conv_id,))
-                recent_rows = cursor.fetchall()
-                conv_history = []
-                for r in reversed(recent_rows):
-                    if r["direction"] == "inbound":
-                        conv_history.append({"role": "user", "content": r["message_text"]})
-                    else:
-                        c = r["approved_text"] or r["ai_draft"]
-                        if c:
-                            conv_history.append({"role": "assistant", "content": c})
-
-                # Generate AI draft response grounded in Abenzo Knowledge Base
-                ai_draft = ""
-                lead_temp = "early"
-                needs_human = True
-                try:
-                    draft_res = await draft_inbound_response_with_ai(text, conv_history, agency_profile)
-                    ai_draft = (draft_res.get("ai_draft") or "").strip()
-                    lead_temp = draft_res.get("lead_temperature", "early")
-                    needs_human = bool(draft_res.get("needs_human_decision", True))
-                except Exception:
-                    ai_draft = "Hi! Thank you for reaching out to Abenzo. A team member will follow up shortly."
-                    needs_human = True
-
-                # Determine if eligible for automated outbound dispatch:
-                # - Explicit auto_reply_faq_enabled setting is active
-                # - High-confidence, routine response grounded in approved knowledge (needs_human is False)
-                # - Real inbound recipient within the Meta 24h messaging window
-                # - Instagram access token configured
-                is_auto_reply_eligible = (
-                    auto_reply_enabled and
-                    bool(ai_draft) and
-                    not needs_human and
-                    bool(settings.effective_instagram_token) and
-                    not sender_id.startswith("sample_") and
-                    not sender_id.startswith("manual_") and
-                    sender_id not in own_ids
-                )
-
-                if is_auto_reply_eligible:
-                    # Dispatched directly to genuine inbound user via official Instagram Graph API
-                    dispatch_res = await dispatch_instagram_dm(sender_id, ai_draft)
+                if is_auto_reply_eligible and dispatch_res:
                     if dispatch_res.get("success"):
                         meta_mid = dispatch_res.get("meta_message_id", "")
                         cursor.execute("""
@@ -373,7 +404,6 @@ async def receive_meta_webhook(
                             WHERE id = ?
                         """, (lead_temp, now, now, conv_id))
                 else:
-                    # Flag for human review: uncertain question, complaint, or complex scope/pricing
                     cursor.execute("""
                         INSERT INTO conversation_events (
                             conversation_id, external_event_id, event_type, direction,
@@ -391,10 +421,11 @@ async def receive_meta_webhook(
                     """, (lead_temp, now, now, conv_id))
 
                 processed_count += 1
-
-        conn.commit()
+        except Exception as e:
+            logger.error("Database error saving event record for mid %s: %s", mid, type(e).__name__)
 
     return {"status": "ok", "events_processed": processed_count}
+
 
 @router.post("/sync")
 async def sync_instagram_conversations():
@@ -422,63 +453,84 @@ async def sync_instagram_conversations():
             synced = 0
             now = datetime.now().isoformat()
 
-            with get_db() as conn:
-                cursor = conn.cursor()
-                cursor.execute("SELECT value FROM app_settings WHERE key = 'business_profile'")
-                prof_row = cursor.fetchone()
-                agency_profile = json.loads(prof_row["value"]) if prof_row else {}
+            agency_profile = {}
+            try:
+                with get_db() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT value FROM app_settings WHERE key = 'business_profile'")
+                    prof_row = cursor.fetchone()
+                    if prof_row:
+                        agency_profile = json.loads(prof_row["value"])
+            except Exception:
+                agency_profile = {}
 
-                for thread in data:
-                    thread_id = thread.get("id")
-                    messages = thread.get("messages", {}).get("data", [])
+            for thread in data:
+                thread_id = thread.get("id")
+                messages = thread.get("messages", {}).get("data", [])
 
-                    for msg in messages:
-                        mid = msg.get("id")
-                        text = msg.get("message")
-                        sender_id = msg.get("from", {}).get("id")
-                        sender_name = msg.get("from", {}).get("username") or f"User ({sender_id[:6]})"
+                for msg in messages:
+                    mid = msg.get("id")
+                    text = msg.get("message")
+                    sender_id = msg.get("from", {}).get("id")
+                    sender_name = msg.get("from", {}).get("username") or f"User ({sender_id[:6]})"
 
-                        if not mid or not text:
-                            continue
+                    if not mid or not text:
+                        continue
 
-                        # Deduplication check
-                        cursor.execute("SELECT id FROM conversation_events WHERE external_event_id = ?", (mid,))
-                        if cursor.fetchone():
-                            continue
+                    # Step 1: Check deduplication and get/create conversation (Short DB transaction)
+                    conv_id = None
+                    is_dup = False
+                    try:
+                        with get_db() as conn:
+                            cursor = conn.cursor()
+                            cursor.execute("SELECT id FROM conversation_events WHERE external_event_id = ?", (mid,))
+                            if cursor.fetchone():
+                                is_dup = True
+                            else:
+                                cursor.execute("SELECT id, recipient_id FROM conversations WHERE external_thread_id = ?", (thread_id,))
+                                conv = cursor.fetchone()
+                                if conv:
+                                    conv_id = conv["id"]
+                                    if sender_id and not conv["recipient_id"]:
+                                        cursor.execute("UPDATE conversations SET recipient_id = ? WHERE id = ?", (sender_id, conv_id))
+                                else:
+                                    cursor.execute("""
+                                        INSERT INTO conversations (
+                                            platform, external_thread_id, recipient_id, contact_display_name,
+                                            status, needs_human, lead_temperature, notes, created_at, updated_at
+                                        ) VALUES ('instagram', ?, ?, ?, 'active', 1, 'early', 'Synced from Instagram API', ?, ?)
+                                    """, (thread_id, sender_id or "", sender_name, now, now))
+                                    conv_id = cursor.lastrowid
+                    except Exception as e:
+                        logger.error("DB error looking up synced thread %s: %s", thread_id, type(e).__name__)
+                        continue
 
-                        # Find or create conversation
-                        cursor.execute("SELECT id, recipient_id FROM conversations WHERE external_thread_id = ?", (thread_id,))
-                        conv = cursor.fetchone()
-                        if conv:
-                            conv_id = conv["id"]
-                            if sender_id and not conv["recipient_id"]:
-                                cursor.execute("UPDATE conversations SET recipient_id = ? WHERE id = ?", (sender_id, conv_id))
-                        else:
-                            cursor.execute("""
-                                INSERT INTO conversations (
-                                    platform, external_thread_id, recipient_id, contact_display_name,
-                                    status, needs_human, lead_temperature, notes, created_at, updated_at
-                                ) VALUES ('instagram', ?, ?, ?, 'active', 1, 'early', 'Synced from Instagram API', ?, ?)
-                            """, (thread_id, sender_id or "", sender_name, now, now))
-                            conv_id = cursor.lastrowid
+                    if is_dup or not conv_id:
+                        continue
 
-                        # Draft reply
-                        ai_draft = ""
-                        try:
-                            draft_res = await draft_inbound_response_with_ai(text, [], agency_profile)
-                            ai_draft = draft_res.get("ai_draft", "")
-                        except Exception:
-                            ai_draft = "Hi! Thank you for reaching out to Abenzo. A member of our team will follow up shortly."
+                    # Step 2: Draft reply with AI (OUTSIDE DB transaction)
+                    ai_draft = ""
+                    try:
+                        draft_res = await draft_inbound_response_with_ai(text, [], agency_profile)
+                        ai_draft = draft_res.get("ai_draft", "")
+                    except Exception:
+                        ai_draft = "Hi! Thank you for reaching out to Abenzo. A member of our team will follow up shortly."
 
-                        cursor.execute("""
-                            INSERT INTO conversation_events (
-                                conversation_id, external_event_id, event_type, direction,
-                                message_text, ai_draft, approved_text, delivery_status, created_at
-                            ) VALUES (?, ?, 'dm', 'inbound', ?, ?, '', 'draft_pending', ?)
-                        """, (conv_id, mid, text, ai_draft, now))
-                        synced += 1
-
-                conn.commit()
+                    # Step 3: Insert event (Short DB transaction)
+                    try:
+                        with get_db() as conn:
+                            cursor = conn.cursor()
+                            cursor.execute("SELECT id FROM conversation_events WHERE external_event_id = ?", (mid,))
+                            if not cursor.fetchone():
+                                cursor.execute("""
+                                    INSERT INTO conversation_events (
+                                        conversation_id, external_event_id, event_type, direction,
+                                        message_text, ai_draft, approved_text, delivery_status, created_at
+                                    ) VALUES (?, ?, 'dm', 'inbound', ?, ?, '', 'draft_pending', ?)
+                                """, (conv_id, mid, text, ai_draft, now))
+                                synced += 1
+                    except Exception as e:
+                        logger.error("DB error saving synced message %s: %s", mid, type(e).__name__)
 
             return {
                 "status": "success",

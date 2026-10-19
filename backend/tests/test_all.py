@@ -781,4 +781,131 @@ def test_safe_knowledge_seeding_idempotency(tmp_path):
     conn.close()
 
 
+def test_get_db_dead_connection_does_not_mask_original_exception(monkeypatch):
+    """
+    Verifies that if a connection is terminated and rollback fails with an OperationalError,
+    get_db() does NOT mask the original exception with psycopg.OperationalError.
+    """
+    class DeadConnection:
+        def __init__(self):
+            self.closed = True
+
+        def commit(self):
+            pass
+
+        def rollback(self):
+            # Simulate psycopg throwing when rollback is attempted on a terminated connection
+            raise RuntimeError("psycopg.OperationalError: connection is closed (dead connection)")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("backend.app.database.get_db_connection", lambda db_path=None: DeadConnection())
+
+    class OriginalQueryTimeoutError(Exception):
+        pass
+
+    with pytest.raises(OriginalQueryTimeoutError):
+        with get_db() as conn:
+            # Simulate IdleInTransactionSessionTimeout raised during query execution
+            raise OriginalQueryTimeoutError("terminating connection due to idle-in-transaction timeout")
+
+
+def test_pg_connection_wrapper_closed_safety():
+    """
+    Verifies that PgConnectionWrapper handles a closed/terminated psycopg connection safely
+    without throwing exceptions during rollback or close.
+    """
+    from backend.app.database import PgConnectionWrapper
+
+    class MockPsycopgConn:
+        def __init__(self):
+            self.closed = True
+
+        def rollback(self):
+            raise RuntimeError("OperationalError: connection terminated")
+
+        def close(self):
+            raise RuntimeError("OperationalError: connection terminated")
+
+    wrapper = PgConnectionWrapper(MockPsycopgConn())
+    # Neither rollback nor close should throw
+    wrapper.rollback()
+    wrapper.close()
+
+
+def test_webhook_external_calls_happen_outside_db_transactions(monkeypatch):
+    """
+    Verifies that draft_inbound_response_with_ai and dispatch_instagram_dm are called
+    strictly OUTSIDE any database connection context in the webhook handler.
+    """
+    db_is_open = False
+    original_get_db = get_db
+
+    from contextlib import contextmanager
+    @contextmanager
+    def tracked_get_db(db_path=None):
+        nonlocal db_is_open
+        with original_get_db(db_path) as conn:
+            db_is_open = True
+            try:
+                yield conn
+            finally:
+                db_is_open = False
+
+    monkeypatch.setattr("backend.app.routers.meta.get_db", tracked_get_db)
+    monkeypatch.setattr("backend.app.config.settings.META_ACCESS_TOKEN", "test_ig_token_abc")
+
+    # Enable auto_reply
+    with original_get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT value FROM app_settings WHERE key = 'business_profile'")
+        r = cursor.fetchone()
+        p = json.loads(r["value"]) if r else {}
+        p["auto_reply_faq_enabled"] = True
+        cursor.execute("UPDATE app_settings SET value = ? WHERE key = 'business_profile'", (json.dumps(p),))
+        conn.commit()
+
+    draft_called_while_db_open = None
+    async def mock_draft(incoming, history, profile):
+        nonlocal draft_called_while_db_open
+        draft_called_while_db_open = db_is_open
+        return {
+            "ai_draft": "We offer custom websites starting at ₹15,000.",
+            "reasoning": "Standard inquiry",
+            "lead_temperature": "qualified",
+            "needs_human_decision": False
+        }
+
+    dispatch_called_while_db_open = None
+    async def mock_dispatch(recipient_id, text):
+        nonlocal dispatch_called_while_db_open
+        dispatch_called_while_db_open = db_is_open
+        return {"success": True, "meta_message_id": "mid_tx_test_123"}
+
+    monkeypatch.setattr("backend.app.routers.meta.draft_inbound_response_with_ai", mock_draft)
+    monkeypatch.setattr("backend.app.routers.meta.dispatch_instagram_dm", mock_dispatch)
+
+    payload = {
+        "entry": [{
+            "messaging": [{
+                "sender": {"id": "ig_user_boundary_test"},
+                "message": {
+                    "mid": "mid_boundary_event_001",
+                    "text": "What are your services?"
+                }
+            }]
+        }]
+    }
+
+    resp = client.post("/api/meta/webhook", json=payload)
+    assert resp.status_code == 200
+    assert resp.json()["events_processed"] == 1
+
+    # CRUCIAL ASSERTIONS: Neither AI draft nor Instagram dispatch may be called while DB is open!
+    assert draft_called_while_db_open is False, "draft_inbound_response_with_ai was called inside get_db()!"
+    assert dispatch_called_while_db_open is False, "dispatch_instagram_dm was called inside get_db()!"
+
+
+
 
