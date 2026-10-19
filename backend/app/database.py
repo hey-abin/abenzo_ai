@@ -1,9 +1,12 @@
 import sqlite3
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
 from contextlib import contextmanager
 from backend.app.config import settings
+
+logger = logging.getLogger("abenzo.database")
 
 
 # ---------------------------------------------------------------------------
@@ -16,9 +19,21 @@ def _is_postgres() -> bool:
 
 
 def _pg_connection():
-    """Create a psycopg PostgreSQL connection."""
+    """Create a psycopg PostgreSQL connection with connection and statement timeouts."""
     import psycopg
-    conn = psycopg.connect(settings.DATABASE_URL, autocommit=False)
+    logger.info("[Database] Connecting to PostgreSQL (Neon)...")
+    conn = psycopg.connect(
+        settings.DATABASE_URL,
+        autocommit=False,
+        connect_timeout=10,
+    )
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SET statement_timeout = '15s'; SET lock_timeout = '5s';")
+        conn.commit()
+    except Exception as e:
+        logger.warning("[Database] Could not set session timeouts on PostgreSQL connection: %s", e)
+    logger.info("[Database] Connected to PostgreSQL successfully.")
     return conn
 
 
@@ -240,11 +255,12 @@ def init_db(db_path: str = None):
     On SQLite, PRAGMA table_info is used for migration detection.
     """
     using_pg = _is_postgres() and db_path is None
+    logger.info("[init_db] Starting database schema initialization (engine=%s)...", "postgresql" if using_pg else "sqlite")
 
     with get_db(db_path) as conn:
         cursor = conn.cursor()
 
-        # Leads table
+        # 1. Leads table
         cursor.execute(f"""
         CREATE TABLE IF NOT EXISTS leads (
             {_serial_pk()},
@@ -270,7 +286,7 @@ def init_db(db_path: str = None):
         );
         """)
 
-        # Conversations table
+        # 2. Conversations table
         cursor.execute(f"""
         CREATE TABLE IF NOT EXISTS conversations (
             {_serial_pk()},
@@ -290,7 +306,7 @@ def init_db(db_path: str = None):
         );
         """)
 
-        # Conversation Events table
+        # 3. Conversation Events table
         cursor.execute(f"""
         CREATE TABLE IF NOT EXISTS conversation_events (
             {_serial_pk()},
@@ -310,13 +326,46 @@ def init_db(db_path: str = None):
         );
         """)
 
+        # 4. Settings table
+        cursor.execute(f"""
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        """)
+
+        # 5. Knowledge Base table
+        cursor.execute(f"""
+        CREATE TABLE IF NOT EXISTS knowledge_items (
+            {_serial_pk()},
+            category TEXT NOT NULL,
+            title TEXT NOT NULL,
+            content TEXT NOT NULL,
+            source_url TEXT NOT NULL,
+            retrieval_time TEXT NOT NULL,
+            verification_status TEXT DEFAULT 'approved',
+            raw_metadata TEXT DEFAULT '{json.dumps({})}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        """)
+
+        logger.info("[init_db] Core tables verified.")
+
         # Backward-compatible migrations
         if using_pg:
-            # PostgreSQL supports ADD COLUMN IF NOT EXISTS
-            cursor.execute("ALTER TABLE conversations ADD COLUMN IF NOT EXISTS recipient_id TEXT DEFAULT ''")
-            cursor.execute("ALTER TABLE conversation_events ADD COLUMN IF NOT EXISTS meta_message_id TEXT DEFAULT ''")
-            cursor.execute("ALTER TABLE conversation_events ADD COLUMN IF NOT EXISTS error_details TEXT DEFAULT ''")
-            cursor.execute("ALTER TABLE conversation_events ADD COLUMN IF NOT EXISTS sent_at TEXT DEFAULT ''")
+            # Query existing columns first to avoid unnecessary ALTER TABLE and ACCESS EXCLUSIVE locks
+            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'conversations'")
+            conv_cols = {row[0] for row in cursor.fetchall()}
+            if "recipient_id" not in conv_cols:
+                cursor.execute("ALTER TABLE conversations ADD COLUMN recipient_id TEXT DEFAULT ''")
+
+            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'conversation_events'")
+            event_cols = {row[0] for row in cursor.fetchall()}
+            for col in ("meta_message_id", "error_details", "sent_at"):
+                if col not in event_cols:
+                    cursor.execute(f"ALTER TABLE conversation_events ADD COLUMN {col} TEXT DEFAULT ''")
 
             # Synchronize serial sequences with current MAX(id) to avoid duplicate key violations
             for tbl in ("leads", "conversations", "conversation_events", "knowledge_items"):
@@ -330,6 +379,7 @@ def init_db(db_path: str = None):
                     """)
                 except Exception:
                     pass
+            logger.info("[init_db] PostgreSQL migrations and sequences synchronized.")
         else:
             # SQLite uses PRAGMA table_info for migration detection
             cursor.execute("PRAGMA table_info(conversations)")
@@ -345,31 +395,7 @@ def init_db(db_path: str = None):
                 cursor.execute("ALTER TABLE conversation_events ADD COLUMN error_details TEXT DEFAULT ''")
             if "sent_at" not in event_cols:
                 cursor.execute("ALTER TABLE conversation_events ADD COLUMN sent_at TEXT DEFAULT ''")
-
-        # Settings table
-        cursor.execute(f"""
-        CREATE TABLE IF NOT EXISTS app_settings (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        );
-        """)
-
-        # Knowledge Base table
-        cursor.execute(f"""
-        CREATE TABLE IF NOT EXISTS knowledge_items (
-            {_serial_pk()},
-            category TEXT NOT NULL,
-            title TEXT NOT NULL,
-            content TEXT NOT NULL,
-            source_url TEXT NOT NULL,
-            retrieval_time TEXT NOT NULL,
-            verification_status TEXT DEFAULT 'approved',
-            raw_metadata TEXT DEFAULT '{json.dumps({})}',
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        );
-        """)
+            logger.info("[init_db] SQLite migrations verified.")
 
         # Insert initial default business profile if not present
         cursor.execute(f"SELECT value FROM app_settings WHERE key = {_ph()}", ("business_profile",))
@@ -415,11 +441,16 @@ def init_db(db_path: str = None):
                 f"INSERT INTO app_settings (key, value, updated_at) VALUES ({_ph(2)}, {now_sql})",
                 ("business_profile", json.dumps(default_profile))
             )
+            logger.info("[init_db] Default business profile inserted.")
+        else:
+            logger.info("[init_db] Business profile already present.")
 
         # Seed initial knowledge items idempotently if empty or missing
-        seed_initial_knowledge(cursor)
+        seeded = seed_initial_knowledge(cursor)
+        logger.info("[init_db] Knowledge base verified (%d new items added).", seeded)
 
         conn.commit()
+        logger.info("[init_db] Database initialization committed successfully.")
 
 
 def seed_initial_knowledge(cursor) -> int:
@@ -440,6 +471,19 @@ def seed_initial_knowledge(cursor) -> int:
 
     ph = _ph
 
+    # Batch check existing (title, category) in one query to avoid 20 sequential round-trips
+    try:
+        cursor.execute("SELECT title, category FROM knowledge_items")
+        rows = cursor.fetchall()
+        existing = set()
+        for r in rows:
+            if isinstance(r, (list, tuple)):
+                existing.add((r[0], r[1]))
+            elif hasattr(r, "__getitem__"):
+                existing.add((r["title"], r["category"]))
+    except Exception:
+        existing = set()
+
     inserted_count = 0
     now = datetime.now().isoformat()
     for item in items:
@@ -448,8 +492,7 @@ def seed_initial_knowledge(cursor) -> int:
         if not title or not category:
             continue
 
-        cursor.execute(f"SELECT id FROM knowledge_items WHERE title = {ph()} AND category = {ph()}", (title, category))
-        if cursor.fetchone():
+        if (title, category) in existing:
             continue  # Already exists, never duplicate or overwrite
 
         cursor.execute(f"""
@@ -469,5 +512,6 @@ def seed_initial_knowledge(cursor) -> int:
             now
         ))
         inserted_count += 1
+        existing.add((title, category))
 
     return inserted_count
