@@ -1,8 +1,13 @@
 import re
 import html
+import logging
 from typing import Optional, Dict, Any, List, Tuple
 from urllib.parse import urlparse, parse_qs
 from datetime import datetime
+
+from backend.app.config import settings
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Instagram URL & Profile Extraction Utilities
@@ -12,19 +17,21 @@ INSTAGRAM_RESERVED_PATHS = {
     "p", "reel", "reels", "tv", "explore", "stories", "popular",
     "tags", "directory", "accounts", "about", "legal", "developer",
     "privacy", "help", "graphql", "api", "challenge", "login",
-    "web", "session", "support", "press", "contact", "terms"
+    "web", "session", "support", "press", "contact", "terms",
+    "guides", "highlights", "feed"
 }
 
 AGGREGATOR_LISTICLE_DOMAINS = {
     "duckduckgo.com", "google.com", "bing.com", "yahoo.com",
     "wikipedia.org", "youtube.com", "facebook.com", "twitter.com",
-    "linkedin.com", "tripadvisor.com", "justdial.com", "indiamart.com",
+    "linkedin.com", "tripadvisor.com", "tripadvisor.in", "justdial.com", "indiamart.com",
     "yellowpages.in", "sulekha.com", "zomato.com", "swiggy.com",
-    "practo.com", "amazon.in", "flipkart.com", "quora.com",
+    "practo.com", "amazon.in", "amazon.com", "flipkart.com", "quora.com",
     "reddit.com", "medium.com", "lbb.in", "lifestyleasia.com",
     "curlytales.com", "clutch.co", "goodfirms.co", "magicbricks.com",
     "99acres.com", "housing.com", "forbes.com", "tradeindia.com",
-    "exportersindia.com", "dir.indiamart.com"
+    "exportersindia.com", "dir.indiamart.com", "foursquare.com",
+    "mouthshut.com", "trustpilot.com"
 }
 
 LISTICLE_TITLE_PATTERNS = [
@@ -38,7 +45,9 @@ LISTICLE_TITLE_PATTERNS = [
     r"\bb2b\s+portal\b",
     r"\bdirectory\b",
     r"\bbuy\s+online\s+wholesale\b",
-    r"\bshopping\s+guide\b"
+    r"\bshopping\s+guide\b",
+    r"\bplaces\s+to\s+visit\b",
+    r"\bthings\s+to\s+do\b"
 ]
 
 
@@ -58,34 +67,179 @@ def extract_root_domain(url: str) -> str:
     return norm.split("/")[0] if norm else ""
 
 
-def is_valid_instagram_profile_url(url: str) -> Tuple[bool, str]:
+def normalize_location_input(location_raw: str) -> Dict[str, Any]:
     """
-    Returns (True, clean_username) if url is a genuine individual Instagram profile.
-    Rejects posts (/p/), reels (/reel/), tags (/tags/), explore, search result listicles, etc.
+    Normalizes compound and simple location inputs such as:
+    'kerala' -> city='', state='Kerala'
+    'Kerala, India' -> city='', state='Kerala'
+    'kochi, kerala' -> city='Kochi', state='Kerala'
+    'Kochi' -> city='Kochi', state='Kerala'
+    """
+    if not location_raw:
+        return {"city": "", "state": "", "display": "", "aliases": []}
+
+    loc = location_raw.strip()
+    # Strip country suffixes
+    loc = re.sub(r"(?i)[,\s]+(india|in)$", "", loc).strip()
+    if loc.lower() in ("all states", "all", "india", ""):
+        return {"city": "", "state": "", "display": "", "aliases": []}
+
+    CITY_STATE_MAP = {
+        "kochi": ("Kochi", "Kerala", ["Cochin", "Ernakulam"]),
+        "cochin": ("Kochi", "Kerala", ["Kochi", "Ernakulam"]),
+        "ernakulam": ("Kochi", "Kerala", ["Kochi", "Cochin"]),
+        "trivandrum": ("Trivandrum", "Kerala", ["Thiruvananthapuram"]),
+        "thiruvananthapuram": ("Trivandrum", "Kerala", ["Trivandrum"]),
+        "calicut": ("Kozhikode", "Kerala", ["Kozhikode"]),
+        "kozhikode": ("Kozhikode", "Kerala", ["Calicut"]),
+        "thrissur": ("Thrissur", "Kerala", ["Trichur"]),
+        "trichur": ("Thrissur", "Kerala", ["Thrissur"]),
+        "kannur": ("Kannur", "Kerala", ["Cannanore"]),
+        "kollam": ("Kollam", "Kerala", ["Quilon"]),
+        "alappuzha": ("Alappuzha", "Kerala", ["Alleppey"]),
+        "alleppey": ("Alappuzha", "Kerala", ["Alappuzha"]),
+        "palakkad": ("Palakkad", "Kerala", ["Palghat"]),
+        "kottayam": ("Kottayam", "Kerala", []),
+        "bangalore": ("Bangalore", "Karnataka", ["Bengaluru"]),
+        "bengaluru": ("Bangalore", "Karnataka", ["Bangalore"]),
+        "mumbai": ("Mumbai", "Maharashtra", ["Bombay"]),
+        "bombay": ("Mumbai", "Maharashtra", ["Mumbai"]),
+        "pune": ("Pune", "Maharashtra", []),
+        "hyderabad": ("Hyderabad", "Telangana", []),
+        "chennai": ("Chennai", "Tamil Nadu", ["Madras"]),
+        "delhi": ("Delhi", "Delhi", ["New Delhi"]),
+        "new delhi": ("Delhi", "Delhi", ["Delhi"]),
+    }
+
+    INDIAN_STATES_MAP = {
+        "kerala": "Kerala", "karnataka": "Karnataka", "tamil nadu": "Tamil Nadu",
+        "maharashtra": "Maharashtra", "delhi": "Delhi", "telangana": "Telangana",
+        "andhra pradesh": "Andhra Pradesh", "gujarat": "Gujarat", "rajasthan": "Rajasthan",
+        "uttar pradesh": "Uttar Pradesh", "west bengal": "West Bengal", "punjab": "Punjab",
+        "haryana": "Haryana", "goa": "Goa", "assam": "Assam", "bihar": "Bihar",
+        "madhya pradesh": "Madhya Pradesh", "odisha": "Odisha"
+    }
+
+    if "," in loc:
+        parts = [p.strip() for p in loc.split(",") if p.strip()]
+        first = parts[0]
+        second = parts[1] if len(parts) > 1 else ""
+        first_lower = first.lower()
+        if first_lower in CITY_STATE_MAP:
+            c, s, aliases = CITY_STATE_MAP[first_lower]
+            st = second.title() if second else s
+            return {"city": c, "state": st, "display": f"{c}, {st}", "aliases": aliases}
+        return {"city": first.title(), "state": second.title(), "display": f"{first.title()}, {second.title()}", "aliases": []}
+
+    loc_lower = loc.lower()
+    if loc_lower in CITY_STATE_MAP:
+        c, s, aliases = CITY_STATE_MAP[loc_lower]
+        return {"city": c, "state": s, "display": c, "aliases": aliases}
+
+    if loc_lower in INDIAN_STATES_MAP:
+        return {"city": "", "state": INDIAN_STATES_MAP[loc_lower], "display": INDIAN_STATES_MAP[loc_lower], "aliases": []}
+
+    return {"city": loc.title(), "state": "", "display": loc.title(), "aliases": []}
+
+
+def generate_targeted_queries(
+    niche: str,
+    loc_info: Dict[str, Any],
+    keywords: str = "",
+    source_mode: str = "instagram_only"
+) -> List[str]:
+    """
+    Generates multiple targeted search queries tailored to finding individual business profiles.
+    Avoids rigid quotes that cause false negatives while ensuring geographic specificity.
+    """
+    clean_niche = niche.strip()
+    clean_kw = keywords.strip()
+    city = loc_info.get("city", "")
+    state = loc_info.get("state", "")
+    aliases = loc_info.get("aliases", [])
+
+    queries = []
+
+    if source_mode == "instagram_only":
+        if city and state:
+            queries.append(f"site:instagram.com {city} {clean_niche} {clean_kw}".strip())
+            queries.append(f"site:instagram.com {clean_niche} {city}".strip())
+            queries.append(f"site:instagram.com {clean_niche} {state}".strip())
+            if aliases:
+                queries.append(f"site:instagram.com {aliases[0]} {clean_niche}".strip())
+        elif city:
+            queries.append(f"site:instagram.com {city} {clean_niche} {clean_kw}".strip())
+            queries.append(f"site:instagram.com {clean_niche} {city}".strip())
+            if aliases:
+                queries.append(f"site:instagram.com {aliases[0]} {clean_niche}".strip())
+        elif state:
+            queries.append(f"site:instagram.com {state} {clean_niche} {clean_kw}".strip())
+            queries.append(f"site:instagram.com {clean_niche} in {state}".strip())
+        else:
+            queries.append(f"site:instagram.com {clean_niche} {clean_kw}".strip())
+            queries.append(f"site:instagram.com {clean_niche} business".strip())
+    else:
+        # All sources mode
+        loc_str = f"{city} {state}".strip() or loc_info.get("display", "")
+        if loc_str:
+            queries.append(f"{clean_niche} {loc_str} {clean_kw} business".strip())
+            queries.append(f"{clean_niche} in {loc_str}".strip())
+        else:
+            queries.append(f"{clean_niche} {clean_kw} small business India".strip())
+
+    # Deduplicate while preserving order
+    seen = set()
+    deduped_queries = []
+    for q in queries:
+        q_clean = " ".join(q.split())
+        if q_clean and q_clean not in seen:
+            seen.add(q_clean)
+            deduped_queries.append(q_clean)
+
+    return deduped_queries[:4]
+
+
+def classify_instagram_url(url: str) -> Tuple[bool, str, str]:
+    """
+    Returns (is_valid_profile, clean_username, rejection_reason).
+    Rejection reasons:
+    - 'non_instagram_url'
+    - 'empty_path'
+    - 'reserved_path' (posts /p/, reels, stories, explore, popular, directory, accounts, etc.)
+    - 'invalid_username'
     """
     if not url:
-        return False, ""
-    parsed = urlparse(url)
+        return False, "", "empty_url"
+
+    parsed = urlparse(url.strip())
     domain = parsed.netloc.lower()
     if "instagram.com" not in domain:
-        return False, ""
+        return False, "", "non_instagram_url"
 
-    # Path segments
     path = parsed.path.strip("/")
     if not path:
-        return False, ""
+        return False, "", "empty_path"
 
     parts = path.split("/")
     first_seg = parts[0].strip().lower()
 
     if first_seg in INSTAGRAM_RESERVED_PATHS:
-        return False, ""
+        return False, "", "reserved_path"
 
     # Username pattern: 1 to 30 characters, letters, numbers, periods, underscores
-    if re.match(r"^[a-zA-Z0-9_\.]{2,35}$", first_seg):
-        return True, first_seg
+    cleaned_user = first_seg.strip(".")
+    if re.match(r"^[a-zA-Z0-9_\.]{1,30}$", first_seg) and len(cleaned_user) >= 1:
+        return True, first_seg, ""
 
-    return False, ""
+    return False, "", "invalid_username"
+
+
+def is_valid_instagram_profile_url(url: str) -> Tuple[bool, str]:
+    """
+    Backward-compatible 2-tuple return: (True, clean_username) if url is a genuine individual Instagram profile.
+    """
+    valid, user, _ = classify_instagram_url(url)
+    return valid, user
 
 
 def extract_instagram_handle(url: str) -> str:
@@ -97,7 +251,7 @@ def extract_instagram_handle(url: str) -> str:
         return username
     # If passed as @username or bare username
     cleaned = u.strip().lstrip("@").rstrip("/")
-    if re.match(r"^[a-zA-Z0-9_\.]{2,35}$", cleaned) and cleaned.lower() not in INSTAGRAM_RESERVED_PATHS:
+    if re.match(r"^[a-zA-Z0-9_\.]{1,30}$", cleaned) and cleaned.lower() not in INSTAGRAM_RESERVED_PATHS:
         return cleaned.lower()
     return ""
 
@@ -112,18 +266,14 @@ def clean_instagram_business_name(raw_title: str, username: str) -> str:
         return f"@{username}" if username else "Local Business"
 
     title = html.unescape(raw_title).strip()
-    # Remove Instagram suffix
     title = re.sub(r"\s*[•\-|–—]\s*Instagram.*$", "", title, flags=re.IGNORECASE).strip()
     title = re.sub(r"\s*on\s+Instagram.*$", "", title, flags=re.IGNORECASE).strip()
-    # Remove handle from brackets: 'Kochi Boutique (@kochi_boutiquee)' -> 'Kochi Boutique'
     title = re.sub(r"\s*\(@[a-zA-Z0-9_\.]+\)", "", title).strip()
-    # Remove standalone '@handle'
     title = re.sub(r"^@[a-zA-Z0-9_\.]+\s*", "", title).strip()
 
     if len(title) >= 2 and not title.lower().startswith("instagram"):
         return title[:70].strip()
 
-    # Fallback to readable capitalized handle
     if username:
         words = re.sub(r"[_\.]+", " ", username).title().strip()
         return words or f"@{username}"
@@ -132,28 +282,22 @@ def clean_instagram_business_name(raw_title: str, username: str) -> str:
 
 
 def extract_contacts_and_links(text: str) -> Dict[str, Any]:
-    """
-    Extracts phone numbers, email addresses, and external website/catalog links from public text.
-    """
     contacts = {"phones": [], "emails": [], "external_links": []}
     if not text:
         return contacts
 
-    # Indian phone numbers
     phones = re.findall(r"(?:\+91[\-\s]?)?[6-9]\d{9}", text)
     for p in phones:
         clean_p = re.sub(r"[^\d+]", "", p)
         if clean_p not in contacts["phones"]:
             contacts["phones"].append(clean_p)
 
-    # Email addresses
     emails = re.findall(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+", text)
     for e in emails:
         clean_e = e.lower().strip()
         if clean_e not in contacts["emails"]:
             contacts["emails"].append(clean_e)
 
-    # URLs mentioned in text
     urls = re.findall(r"https?://[^\s<>\"']+", text)
     for u in urls:
         u_clean = u.rstrip(".,;)")
@@ -171,7 +315,6 @@ def check_duplicate_lead(cursor, business_name: str, website_url: str = "", inst
 
     GENERIC_DOMAINS = {"linktr.ee", "bio.link", "wa.me", "api.whatsapp.com", "instagram.com", "facebook.com"}
 
-    # Check by normalized instagram handle
     if norm_ig:
         cursor.execute("SELECT id, business_name, instagram_url FROM leads")
         for row in cursor.fetchall():
@@ -179,7 +322,6 @@ def check_duplicate_lead(cursor, business_name: str, website_url: str = "", inst
             if row_ig and row_ig.lower() == norm_ig.lower():
                 return {"id": row["id"], "business_name": row["business_name"], "matched_by": "instagram_handle"}
 
-    # Check by website root domain
     if norm_web and norm_web not in GENERIC_DOMAINS:
         cursor.execute("SELECT id, business_name, website_url FROM leads")
         for row in cursor.fetchall():
@@ -187,7 +329,6 @@ def check_duplicate_lead(cursor, business_name: str, website_url: str = "", inst
             if row_domain and row_domain not in GENERIC_DOMAINS and row_domain == norm_web:
                 return {"id": row["id"], "business_name": row["business_name"], "matched_by": "website_url"}
 
-    # Check by exact business name
     cursor.execute("SELECT id, business_name FROM leads WHERE LOWER(TRIM(business_name)) = ?", (norm_name,))
     match = cursor.fetchone()
     if match:
@@ -209,18 +350,13 @@ def evaluate_digital_opportunity(
     snippet: str,
     contacts: Dict[str, Any]
 ) -> Dict[str, Any]:
-    """
-    Evaluates observed digital problems, transparent fit score, and recommended Abenzo service.
-    Rewards relevance and real service opportunities without giving every lead a flat score.
-    """
-    score = 40  # Baseline for matching niche & location
+    score = 40
     breakdown = {"base_relevance": 40}
     reasons = ["Matched business niche and geographic criteria"]
 
     web_lower = website_url.lower() if website_url else ""
     snip_lower = snippet.lower()
 
-    # Determine website status & digital problems
     is_linktree_or_wa = any(x in web_lower for x in ["wa.me", "whatsapp.com", "linktr.ee", "bio.link"]) or not website_url
 
     if is_linktree_or_wa or not website_url:
@@ -232,7 +368,6 @@ def evaluate_digital_opportunity(
         breakdown["no_website_opportunity"] = 25
         reasons.append("No standalone website (+25 pts: Prime customer for Abenzo web development)")
     else:
-        # Check if website is broken or flagged
         if "error" in snip_lower or "404" in snip_lower or "domain expired" in snip_lower:
             website_status = "broken_website"
             observed_problems = "Bio or listed website link appears unreachable or returns an error."
@@ -250,7 +385,6 @@ def evaluate_digital_opportunity(
             breakdown["existing_website_opportunity"] = 10
             reasons.append("Existing website redesign opportunity (+10 pts)")
 
-    # Contact details bonus
     if contacts.get("phones"):
         score += 15
         breakdown["verified_phone"] = 15
@@ -266,7 +400,6 @@ def evaluate_digital_opportunity(
         breakdown["verified_instagram_profile"] = 10
         reasons.append(f"Verified active Instagram business profile @{instagram_handle} (+10 pts)")
 
-    # Location alignment
     if city and city.lower() in snip_lower:
         score += 5
         breakdown["local_geography_match"] = 5
@@ -274,14 +407,12 @@ def evaluate_digital_opportunity(
 
     final_score = max(25, min(95, score))
 
-    # Determine business stage
     business_stage = "small_business"
     if any(k in snip_lower for k in ["startup", "founded in", "tech", "app", "saas", "innovat"]):
         business_stage = "startup"
     elif any(k in snip_lower for k in ["brand", "label", "studio", "atelier", "organic", "artisan"]):
         business_stage = "local_brand"
 
-    # Generate Personalized, Non-Spam Outreach Draft (30-50 words)
     display_name = business_name if len(business_name) < 30 else (f"@{instagram_handle}" if instagram_handle else "there")
     city_str = f" in {city}" if city and city.lower() not in ("all", "india") else ""
 
@@ -320,7 +451,7 @@ def evaluate_digital_opportunity(
 
 
 # ---------------------------------------------------------------------------
-# Search Providers
+# Modular Search Providers (Primary DuckDuckGo + Secondary APIs)
 # ---------------------------------------------------------------------------
 
 class SearchProviderBase:
@@ -331,73 +462,70 @@ class SearchProviderBase:
 
     async def search(
         self,
-        niche: str,
-        city_or_state: str = "",
-        keywords: str = "",
-        source_mode: str = "instagram_only",
-        limit: int = 10
+        queries: List[str],
+        limit: int,
+        source_mode: str,
+        diagnostics: Dict[str, Any]
     ) -> List[Dict[str, Any]]:
         raise NotImplementedError
 
 
-class InstagramBusinessSearchProvider(SearchProviderBase):
+class DuckDuckGoSearchProvider(SearchProviderBase):
     """
-    Discovers actual Instagram business profiles by issuing targeted site:instagram.com queries
-    with niche and location parameters. Strictly rejects listicles, articles, and non-profile paths.
+    Primary provider: DuckDuckGo HTML / Lite search.
+    Detects HTTP 202 Bot Challenge and rate limits transparently.
     """
-    name: str = "Instagram-First Public Business Discovery"
+    name: str = "DuckDuckGo"
 
     def is_configured(self) -> bool:
         return True
 
     async def search(
         self,
-        niche: str,
-        city_or_state: str = "",
-        keywords: str = "",
-        source_mode: str = "instagram_only",
-        limit: int = 10
+        queries: List[str],
+        limit: int,
+        source_mode: str,
+        diagnostics: Dict[str, Any]
     ) -> List[Dict[str, Any]]:
         import httpx
         from bs4 import BeautifulSoup
 
-        # Construct targeted queries
-        queries = []
-        loc = city_or_state.strip() if city_or_state and city_or_state.lower() not in ("all states", "all", "india") else ""
-
-        if source_mode == "instagram_only":
-            if loc:
-                queries.append(f'site:instagram.com/ "{loc}" {niche} {keywords}'.strip())
-                queries.append(f'site:instagram.com/ {niche} "{loc}"'.strip())
-            else:
-                queries.append(f'site:instagram.com/ {niche} {keywords}'.strip())
-        else:
-            # All sources query
-            if loc:
-                queries.append(f'"{loc}" {niche} {keywords} business'.strip())
-            else:
-                queries.append(f'{niche} {keywords} small business India'.strip())
-
+        raw_results = []
         headers = {
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Content-Type": "application/x-www-form-urlencoded",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Origin": "https://lite.duckduckgo.com",
+            "Referer": "https://lite.duckduckgo.com/",
         }
 
-        discovered_raw = []
-        seen_identifiers = set()
+        timeout = float(settings.SEARCH_TIMEOUT_SECONDS or 14.0)
 
-        async with httpx.AsyncClient(timeout=14.0) as client:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, headers=headers) as client:
+            # Session handshake to receive lite cookies
+            try:
+                await client.get("https://lite.duckduckgo.com/lite/")
+            except Exception as e:
+                logger.warning(f"DuckDuckGo handshake failed: {e}")
+
             for q in queries:
-                if len(discovered_raw) >= limit * 2:
+                diagnostics["queries_executed"].append(q)
+                if len(raw_results) >= limit * 2:
                     break
+
                 try:
-                    resp = await client.post(
-                        "https://lite.duckduckgo.com/lite/",
-                        data={"q": q},
-                        headers=headers
-                    )
+                    resp = await client.post("https://lite.duckduckgo.com/lite/", data={"q": q})
+                    
+                    if resp.status_code == 202:
+                        diagnostics["rate_limits"] += 1
+                        diagnostics["provider_status"] = "rate_limited_202"
+                        diagnostics["provider_error_message"] = "DuckDuckGo returned HTTP 202 Bot Challenge from this server IP."
+                        logger.warning(f"DuckDuckGo HTTP 202 Bot Challenge for query: '{q}'")
+                        # Do not keep retrying DDG if challenged with 202
+                        break
+
                     if resp.status_code != 200:
+                        diagnostics["provider_errors"] += 1
                         continue
 
                     soup = BeautifulSoup(resp.text, "html.parser")
@@ -418,67 +546,466 @@ class InstagramBusinessSearchProvider(SearchProviderBase):
                         raw_title = link_tag.get_text(strip=True)
                         snippet_text = snippet_tag.get_text(strip=True) if snippet_tag else ""
 
-                        # Filter out listicles / wholesale / blogs by title & domain
-                        domain = extract_root_domain(target_url)
-                        if not domain or domain in AGGREGATOR_LISTICLE_DOMAINS:
-                            continue
+                        raw_results.append({
+                            "raw_title": raw_title,
+                            "target_url": target_url,
+                            "snippet": snippet_text
+                        })
+                        diagnostics["raw_results_count"] += 1
 
-                        title_lower = raw_title.lower()
-                        if any(re.search(pat, title_lower) for pat in LISTICLE_TITLE_PATTERNS):
-                            continue
+                except httpx.TimeoutException:
+                    diagnostics["timeouts"] += 1
+                    diagnostics["provider_status"] = "timeout"
+                    logger.warning(f"DuckDuckGo timeout for query: '{q}'")
+                except Exception as e:
+                    diagnostics["provider_errors"] += 1
+                    diagnostics["provider_status"] = "error"
+                    logger.warning(f"DuckDuckGo search error: {e}")
 
-                        if source_mode == "instagram_only":
-                            is_profile, username = is_valid_instagram_profile_url(target_url)
-                            if not is_profile or not username:
-                                continue
-                            if username in seen_identifiers:
-                                continue
+        return raw_results
 
-                            seen_identifiers.add(username)
-                            clean_name = clean_instagram_business_name(raw_title, username)
-                            contacts = extract_contacts_and_links(snippet_text)
 
-                            website_url = contacts["external_links"][0] if contacts["external_links"] else ""
+class SerperSearchProvider(SearchProviderBase):
+    """
+    Secondary Provider: Google Search via Serper API (https://google.serper.dev/search).
+    Requires SERPER_API_KEY.
+    """
+    name: str = "Google (Serper API)"
 
-                            discovered_raw.append({
-                                "business_name": clean_name,
-                                "instagram_username": username,
-                                "instagram_handle": username,
-                                "instagram_url": f"https://instagram.com/{username}",
-                                "website_url": website_url,
-                                "domain": extract_root_domain(website_url),
-                                "source_url": target_url,
-                                "raw_title": raw_title,
-                                "snippet": snippet_text,
-                                "contacts": contacts,
-                            })
-                        else:
-                            # All Sources mode: individual business websites or profiles
-                            if domain in seen_identifiers:
-                                continue
-                            seen_identifiers.add(domain)
+    def is_configured(self) -> bool:
+        return bool((settings.SERPER_API_KEY or "").strip())
 
-                            is_profile, username = is_valid_instagram_profile_url(target_url)
-                            clean_name = re.sub(r"\s*[-|–—].*$", "", raw_title).strip() or raw_title[:60]
-                            contacts = extract_contacts_and_links(snippet_text)
+    async def search(
+        self,
+        queries: List[str],
+        limit: int,
+        source_mode: str,
+        diagnostics: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        import httpx
 
-                            discovered_raw.append({
-                                "business_name": clean_name,
-                                "instagram_username": username if is_profile else "",
-                                "instagram_handle": username if is_profile else "",
-                                "instagram_url": f"https://instagram.com/{username}" if is_profile else "",
-                                "website_url": "" if is_profile else target_url,
-                                "domain": domain,
-                                "source_url": target_url,
-                                "raw_title": raw_title,
-                                "snippet": snippet_text,
-                                "contacts": contacts,
-                            })
+        raw_results = []
+        api_key = settings.SERPER_API_KEY.strip()
+        headers = {
+            "X-API-KEY": api_key,
+            "Content-Type": "application/json"
+        }
+        timeout = float(settings.SEARCH_TIMEOUT_SECONDS or 14.0)
 
-                except Exception:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            for q in queries[:2]:
+                diagnostics["queries_executed"].append(f"[Serper] {q}")
+                try:
+                    payload = {"q": q, "gl": "in", "num": limit * 2}
+                    resp = await client.post("https://google.serper.dev/search", json=payload, headers=headers)
+                    if resp.status_code == 429:
+                        diagnostics["rate_limits"] += 1
+                        diagnostics["provider_status"] = "rate_limited_429"
+                        break
+                    if resp.status_code != 200:
+                        diagnostics["provider_errors"] += 1
+                        continue
+
+                    data = resp.json()
+                    for item in data.get("organic", []):
+                        raw_results.append({
+                            "raw_title": item.get("title", ""),
+                            "target_url": item.get("link", ""),
+                            "snippet": item.get("snippet", "")
+                        })
+                        diagnostics["raw_results_count"] += 1
+
+                    if len(raw_results) >= limit * 2:
+                        break
+
+                except httpx.TimeoutException:
+                    diagnostics["timeouts"] += 1
+                except Exception as e:
+                    diagnostics["provider_errors"] += 1
+                    logger.warning(f"Serper API search error: {e}")
+
+        return raw_results
+
+
+class TavilySearchProvider(SearchProviderBase):
+    """
+    Secondary Provider: Tavily Search API (https://api.tavily.com/search).
+    Requires TAVILY_API_KEY.
+    """
+    name: str = "Tavily Search API"
+
+    def is_configured(self) -> bool:
+        return bool((settings.TAVILY_API_KEY or "").strip())
+
+    async def search(
+        self,
+        queries: List[str],
+        limit: int,
+        source_mode: str,
+        diagnostics: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        import httpx
+
+        raw_results = []
+        api_key = settings.TAVILY_API_KEY.strip()
+        timeout = float(settings.SEARCH_TIMEOUT_SECONDS or 14.0)
+
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            for q in queries[:2]:
+                diagnostics["queries_executed"].append(f"[Tavily] {q}")
+                try:
+                    payload = {
+                        "api_key": api_key,
+                        "query": q,
+                        "max_results": limit * 2,
+                    }
+                    if source_mode == "instagram_only":
+                        payload["include_domains"] = ["instagram.com"]
+
+                    resp = await client.post("https://api.tavily.com/search", json=payload)
+                    if resp.status_code == 429:
+                        diagnostics["rate_limits"] += 1
+                        diagnostics["provider_status"] = "rate_limited_429"
+                        break
+                    if resp.status_code != 200:
+                        diagnostics["provider_errors"] += 1
+                        continue
+
+                    data = resp.json()
+                    for item in data.get("results", []):
+                        raw_results.append({
+                            "raw_title": item.get("title", ""),
+                            "target_url": item.get("url", ""),
+                            "snippet": item.get("content", "")
+                        })
+                        diagnostics["raw_results_count"] += 1
+
+                    if len(raw_results) >= limit * 2:
+                        break
+
+                except httpx.TimeoutException:
+                    diagnostics["timeouts"] += 1
+                except Exception as e:
+                    diagnostics["provider_errors"] += 1
+                    logger.warning(f"Tavily search error: {e}")
+
+        return raw_results
+
+
+class BraveSearchProvider(SearchProviderBase):
+    """
+    Secondary Provider: Brave Search API (https://api.search.brave.com/res/v1/web/search).
+    Requires BRAVE_SEARCH_API_KEY.
+    """
+    name: str = "Brave Search API"
+
+    def is_configured(self) -> bool:
+        return bool((settings.BRAVE_SEARCH_API_KEY or "").strip())
+
+    async def search(
+        self,
+        queries: List[str],
+        limit: int,
+        source_mode: str,
+        diagnostics: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        import httpx
+
+        raw_results = []
+        api_key = settings.BRAVE_SEARCH_API_KEY.strip()
+        headers = {"X-Subscription-Token": api_key}
+        timeout = float(settings.SEARCH_TIMEOUT_SECONDS or 14.0)
+
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            for q in queries[:2]:
+                diagnostics["queries_executed"].append(f"[Brave] {q}")
+                try:
+                    resp = await client.get(
+                        "https://api.search.brave.com/res/v1/web/search",
+                        params={"q": q, "count": limit * 2},
+                        headers=headers
+                    )
+                    if resp.status_code == 429:
+                        diagnostics["rate_limits"] += 1
+                        diagnostics["provider_status"] = "rate_limited_429"
+                        break
+                    if resp.status_code != 200:
+                        diagnostics["provider_errors"] += 1
+                        continue
+
+                    data = resp.json()
+                    for item in data.get("web", {}).get("results", []):
+                        raw_results.append({
+                            "raw_title": item.get("title", ""),
+                            "target_url": item.get("url", ""),
+                            "snippet": item.get("description", "")
+                        })
+                        diagnostics["raw_results_count"] += 1
+
+                    if len(raw_results) >= limit * 2:
+                        break
+
+                except httpx.TimeoutException:
+                    diagnostics["timeouts"] += 1
+                except Exception as e:
+                    diagnostics["provider_errors"] += 1
+                    logger.warning(f"Brave search error: {e}")
+
+        return raw_results
+
+
+class SerpApiSearchProvider(SearchProviderBase):
+    """
+    Secondary Provider: SerpApi (https://serpapi.com/search.json).
+    Requires SERPAPI_API_KEY.
+    """
+    name: str = "SerpApi"
+
+    def is_configured(self) -> bool:
+        return bool((settings.SERPAPI_API_KEY or "").strip())
+
+    async def search(
+        self,
+        queries: List[str],
+        limit: int,
+        source_mode: str,
+        diagnostics: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        import httpx
+
+        raw_results = []
+        api_key = settings.SERPAPI_API_KEY.strip()
+        timeout = float(settings.SEARCH_TIMEOUT_SECONDS or 14.0)
+
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            for q in queries[:2]:
+                diagnostics["queries_executed"].append(f"[SerpApi] {q}")
+                try:
+                    resp = await client.get(
+                        "https://serpapi.com/search.json",
+                        params={"q": q, "api_key": api_key, "engine": "google", "num": limit * 2}
+                    )
+                    if resp.status_code == 429:
+                        diagnostics["rate_limits"] += 1
+                        diagnostics["provider_status"] = "rate_limited_429"
+                        break
+                    if resp.status_code != 200:
+                        diagnostics["provider_errors"] += 1
+                        continue
+
+                    data = resp.json()
+                    for item in data.get("organic_results", []):
+                        raw_results.append({
+                            "raw_title": item.get("title", ""),
+                            "target_url": item.get("link", ""),
+                            "snippet": item.get("snippet", "")
+                        })
+                        diagnostics["raw_results_count"] += 1
+
+                    if len(raw_results) >= limit * 2:
+                        break
+
+                except httpx.TimeoutException:
+                    diagnostics["timeouts"] += 1
+                except Exception as e:
+                    diagnostics["provider_errors"] += 1
+                    logger.warning(f"SerpApi search error: {e}")
+
+        return raw_results
+
+
+def get_search_pipeline() -> Tuple[SearchProviderBase, List[SearchProviderBase]]:
+    """
+    Selects primary and secondary search providers according to configuration.
+    """
+    ddg = DuckDuckGoSearchProvider()
+    secondaries = [
+        SerperSearchProvider(),
+        TavilySearchProvider(),
+        BraveSearchProvider(),
+        SerpApiSearchProvider()
+    ]
+    configured_secondaries = [p for p in secondaries if p.is_configured()]
+
+    pref = (settings.SEARCH_PROVIDER or "auto").strip().lower()
+    if pref == "serper":
+        return SerperSearchProvider(), [ddg]
+    elif pref == "tavily":
+        return TavilySearchProvider(), [ddg]
+    elif pref == "brave":
+        return BraveSearchProvider(), [ddg]
+    elif pref == "serpapi":
+        return SerpApiSearchProvider(), [ddg]
+    elif pref == "duckduckgo":
+        return ddg, configured_secondaries
+    else:  # "auto"
+        # Primary is DuckDuckGo; fallbacks are configured secondary APIs
+        return ddg, configured_secondaries
+
+
+class InstagramBusinessSearchProvider(SearchProviderBase):
+    """
+    Discovers actual Instagram business profiles by issuing targeted site:instagram.com queries
+    with niche and location parameters. Strictly rejects listicles, articles, and non-profile paths.
+    Supports primary provider with automatic secondary fallback.
+    """
+    name: str = "Instagram-First Public Business Discovery"
+
+    def is_configured(self) -> bool:
+        return True
+
+    async def search(
+        self,
+        niche: str = "",
+        city_or_state: str = "",
+        keywords: str = "",
+        source_mode: str = "instagram_only",
+        limit: int = 10,
+        diagnostics: Optional[Dict[str, Any]] = None,
+        **kwargs
+    ) -> List[Dict[str, Any]]:
+        # Backward-compatibility for mock search signatures
+        if not niche and "query" in kwargs:
+            niche = kwargs["query"]
+        if not city_or_state and "state" in kwargs:
+            city_or_state = kwargs["state"]
+        if not niche and "industry" in kwargs:
+            niche = kwargs["industry"]
+
+        if diagnostics is None:
+            diagnostics = {
+                "queries_executed": [],
+                "raw_results_count": 0,
+                "instagram_urls_count": 0,
+                "rejected_counts": {"non_profile_path": 0, "aggregator_or_listicle": 0, "invalid_username": 0, "other": 0},
+                "valid_profiles_count": 0,
+                "duplicates_removed": 0,
+                "provider_errors": 0,
+                "timeouts": 0,
+                "rate_limits": 0,
+                "provider_status": "ok",
+                "provider_used": "DuckDuckGo",
+                "fallback_used": False,
+            }
+
+        loc_info = normalize_location_input(city_or_state)
+        queries = generate_targeted_queries(niche, loc_info, keywords, source_mode)
+
+        primary_provider, fallback_providers = get_search_pipeline()
+        diagnostics["provider_used"] = primary_provider.name
+
+        raw_items = await primary_provider.search(
+            queries=queries,
+            limit=limit,
+            source_mode=source_mode,
+            diagnostics=diagnostics
+        )
+
+        # Trigger fallback if primary provider returned 0 results and was rate-limited or errored
+        if len(raw_items) == 0 and fallback_providers:
+            for fallback in fallback_providers:
+                if not fallback.is_configured():
+                    continue
+                logger.info(f"Primary provider returned 0 results. Triggering fallback to {fallback.name}")
+                fallback_items = await fallback.search(
+                    queries=queries,
+                    limit=limit,
+                    source_mode=source_mode,
+                    diagnostics=diagnostics
+                )
+                if fallback_items:
+                    raw_items = fallback_items
+                    diagnostics["provider_used"] = fallback.name
+                    diagnostics["fallback_used"] = True
+                    diagnostics["provider_status"] = "ok"
+                    break
+
+        discovered_candidates = []
+        seen_identifiers = set()
+
+        for item in raw_items:
+            target_url = item.get("target_url", "").strip()
+            raw_title = item.get("raw_title", "").strip()
+            snippet_text = item.get("snippet", "").strip()
+
+            if not target_url:
+                continue
+
+            if "instagram.com" in target_url.lower():
+                diagnostics["instagram_urls_count"] += 1
+
+            # Filter out aggregator / listicle domains
+            domain = extract_root_domain(target_url)
+            if not domain or domain in AGGREGATOR_LISTICLE_DOMAINS:
+                diagnostics["rejected_counts"]["aggregator_or_listicle"] += 1
+                continue
+
+            # Filter out listicles by title
+            title_lower = raw_title.lower()
+            if any(re.search(pat, title_lower) for pat in LISTICLE_TITLE_PATTERNS):
+                diagnostics["rejected_counts"]["aggregator_or_listicle"] += 1
+                continue
+
+            if source_mode == "instagram_only":
+                is_profile, username, rejection_reason = classify_instagram_url(target_url)
+                if not is_profile or not username:
+                    if rejection_reason == "reserved_path":
+                        diagnostics["rejected_counts"]["non_profile_path"] += 1
+                    elif rejection_reason == "invalid_username":
+                        diagnostics["rejected_counts"]["invalid_username"] += 1
+                    else:
+                        diagnostics["rejected_counts"]["other"] += 1
                     continue
 
-        return discovered_raw
+                if username in seen_identifiers:
+                    diagnostics["duplicates_removed"] += 1
+                    continue
+
+                seen_identifiers.add(username)
+                diagnostics["valid_profiles_count"] += 1
+
+                clean_name = clean_instagram_business_name(raw_title, username)
+                contacts = extract_contacts_and_links(snippet_text)
+                website_url = contacts["external_links"][0] if contacts["external_links"] else ""
+
+                discovered_candidates.append({
+                    "business_name": clean_name,
+                    "instagram_username": username,
+                    "instagram_handle": username,
+                    "instagram_url": f"https://instagram.com/{username}",
+                    "website_url": website_url,
+                    "domain": extract_root_domain(website_url),
+                    "source_url": target_url,
+                    "raw_title": raw_title,
+                    "snippet": snippet_text,
+                    "contacts": contacts,
+                })
+            else:
+                # All Sources mode: individual business websites or profiles
+                if domain in seen_identifiers:
+                    diagnostics["duplicates_removed"] += 1
+                    continue
+                seen_identifiers.add(domain)
+
+                is_profile, username = is_valid_instagram_profile_url(target_url)
+                clean_name = re.sub(r"\s*[-|–—].*$", "", raw_title).strip() or raw_title[:60]
+                contacts = extract_contacts_and_links(snippet_text)
+
+                discovered_candidates.append({
+                    "business_name": clean_name,
+                    "instagram_username": username if is_profile else "",
+                    "instagram_handle": username if is_profile else "",
+                    "instagram_url": f"https://instagram.com/{username}" if is_profile else "",
+                    "website_url": "" if is_profile else target_url,
+                    "domain": domain,
+                    "source_url": target_url,
+                    "raw_title": raw_title,
+                    "snippet": snippet_text,
+                    "contacts": contacts,
+                })
+
+        return discovered_candidates
+
 
 # Backward compatibility alias
 PublicDirectorySearchProvider = InstagramBusinessSearchProvider
@@ -501,29 +1028,60 @@ async def execute_lead_discovery(
     limit: int = 10
 ) -> Dict[str, Any]:
     """
-    Executes Instagram-first prospect discovery with opportunity evaluation,
-    transparent fit scoring, and CRM deduplication.
+    Executes Instagram-first prospect discovery with structured diagnostics,
+    location normalization, transparent opportunity scoring, and CRM deduplication.
     """
-    provider = InstagramBusinessSearchProvider()
     clean_niche = niche.strip()
     clean_city = city_or_state.strip()
     clean_keywords = keywords.strip()
+
+    loc_info = normalize_location_input(clean_city)
+    display_location = loc_info.get("display") or clean_city
+
+    diagnostics = {
+        "queries_executed": [],
+        "raw_results_count": 0,
+        "instagram_urls_count": 0,
+        "rejected_counts": {"non_profile_path": 0, "aggregator_or_listicle": 0, "invalid_username": 0, "other": 0},
+        "valid_profiles_count": 0,
+        "duplicates_removed": 0,
+        "provider_errors": 0,
+        "timeouts": 0,
+        "rate_limits": 0,
+        "provider_status": "ok",
+        "provider_used": "DuckDuckGo",
+        "provider_error_message": None,
+        "fallback_used": False,
+    }
+
+    provider = InstagramBusinessSearchProvider()
+
     try:
         raw_candidates = await provider.search(
             niche=clean_niche,
             city_or_state=clean_city,
             keywords=clean_keywords,
             source_mode=source_mode,
-            limit=limit
+            limit=limit,
+            diagnostics=diagnostics
         )
     except TypeError:
-        # Fallback for mock search implementations with legacy signature search(query, state, industry, limit)
-        raw_candidates = await provider.search(
-            f"{clean_niche} {clean_keywords}".strip(),
-            state=clean_city,
-            industry=clean_niche,
-            limit=limit
-        )
+        try:
+            raw_candidates = await provider.search(
+                niche=clean_niche,
+                city_or_state=clean_city,
+                keywords=clean_keywords,
+                source_mode=source_mode,
+                limit=limit
+            )
+        except TypeError:
+            # Fallback for legacy mock signatures
+            raw_candidates = await provider.search(
+                f"{clean_niche} {clean_keywords}".strip(),
+                state=clean_city,
+                industry=clean_niche,
+                limit=limit
+            )
 
     items = []
     now_iso = datetime.now().isoformat()
@@ -536,7 +1094,6 @@ async def execute_lead_discovery(
         b_name = cand.get("business_name", "")
         contacts = cand.get("contacts", {"phones": [], "emails": [], "external_links": []})
 
-        # Deduplication check against existing CRM leads
         dup = check_duplicate_lead(
             cursor,
             business_name=b_name,
@@ -545,22 +1102,20 @@ async def execute_lead_discovery(
         )
         is_dup = dup is not None
 
-        # Exclude CRM filter
         if exclude_crm and is_dup:
+            diagnostics["duplicates_removed"] += 1
             continue
 
-        # Evaluate digital opportunity & transparent fit score
         opp_eval = evaluate_digital_opportunity(
             business_name=b_name,
             niche=clean_niche,
-            city=clean_city,
+            city=loc_info.get("city") or clean_city,
             website_url=web_url,
             instagram_handle=cand.get("instagram_handle", ""),
             snippet=cand.get("snippet", ""),
             contacts=contacts
         )
 
-        # Website filter
         lead_web_status = opp_eval["website_status"]
         if website_filter == "no_website" and lead_web_status != "no_website":
             continue
@@ -569,11 +1124,9 @@ async def execute_lead_discovery(
         elif website_filter == "needs_improvement" and lead_web_status not in ("broken_website", "no_website"):
             continue
 
-        # Minimum score filter
         if min_score and opp_eval["lead_score"] < min_score:
             continue
 
-        # Business stage filter
         lead_stage = opp_eval["business_stage"]
         if stage != "all" and stage != lead_stage:
             continue
@@ -593,8 +1146,8 @@ async def execute_lead_discovery(
             "source_url": cand.get("source_url", web_url or ig_url),
             "industry": clean_niche or "Local Business",
             "business_category": clean_niche or "Local Business",
-            "state": clean_city if clean_city and clean_city.lower() != "all states" else "India",
-            "city": clean_city,
+            "state": loc_info.get("state") or (clean_city if clean_city and clean_city.lower() != "all states" else "India"),
+            "city": loc_info.get("city") or clean_city,
             "snippet": cand.get("snippet", ""),
             "business_stage": lead_stage,
             "website_status": lead_web_status,
@@ -610,27 +1163,51 @@ async def execute_lead_discovery(
             "reachable": lead_web_status != "broken_website",
             "status_code": 200 if lead_web_status != "broken_website" else 404,
             "discovered_at": now_iso,
-            "provider_source": provider.name,
+            "provider_source": diagnostics.get("provider_used") or provider.name,
         }
         items.append(item)
 
         if len(items) >= limit:
             break
 
+    # Determine status & limitation notice
+    provider_name = diagnostics.get("provider_used") or provider.name
     limitation_notice = None
+
     if len(items) == 0:
-        limitation_notice = (
-            f"No verified business profiles found for '{clean_niche}' in '{clean_city or 'selected region'}'. "
-            "DuckDuckGo search returned 0 verified profiles. Try adjusting the niche or city keywords, or switch to All Public Sources."
-        )
+        if diagnostics.get("provider_status") == "rate_limited_202":
+            limitation_notice = (
+                f"DuckDuckGo search provider challenged queries from this server IP (HTTP 202 Bot Challenge). "
+                "0 verified profiles could be retrieved. To enable reliable prospect discovery on cloud hosting, "
+                "configure a secondary search API key (SERPER_API_KEY, TAVILY_API_KEY, or BRAVE_SEARCH_API_KEY) in Settings."
+            )
+        elif diagnostics.get("raw_results_count", 0) > 0 and diagnostics.get("valid_profiles_count", 0) == 0:
+            rejs = diagnostics.get("rejected_counts", {})
+            limitation_notice = (
+                f"Search provider returned {diagnostics['raw_results_count']} raw results, but all were rejected by validation "
+                f"({rejs.get('non_profile_path', 0)} non-profile paths/reels/popular pages, "
+                f"{rejs.get('aggregator_or_listicle', 0)} directories/listicles). "
+                "Try adjusting niche or location keywords."
+            )
+        elif diagnostics.get("provider_status") == "timeout":
+            limitation_notice = (
+                f"Search provider timed out while querying '{clean_niche}' in '{display_location or 'selected region'}'. "
+                "Please retry in a moment."
+            )
+        else:
+            limitation_notice = (
+                f"No verified business profiles found for '{clean_niche}' in '{display_location or 'selected region'}'. "
+                f"{provider_name} returned 0 verified profiles. Try adjusting the niche or city keywords, or switch to All Public Sources."
+            )
 
     return {
         "status": "success",
-        "query": f"{clean_niche} in {clean_city} {clean_keywords}".strip(),
-        "provider": provider.name,
+        "query": f"{clean_niche} in {display_location} {clean_keywords}".strip(),
+        "provider": provider_name,
         "results": items,
         "total_found": len(items),
         "source_mode": source_mode,
         "limitation_notice": limitation_notice,
-        "error_message": None
+        "error_message": None,
+        "diagnostics": diagnostics
     }

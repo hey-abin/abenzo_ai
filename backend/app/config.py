@@ -51,6 +51,14 @@ class Settings(BaseSettings):
     def effective_instagram_app_secret(self) -> str:
         return (self.INSTAGRAM_APP_SECRET or self.META_APP_SECRET or "").strip()
 
+    # Search Provider Configuration
+    SEARCH_PROVIDER: str = "auto"  # "auto", "duckduckgo", "serper", "tavily", "brave", "serpapi"
+    SERPER_API_KEY: str = ""
+    TAVILY_API_KEY: str = ""
+    BRAVE_SEARCH_API_KEY: str = ""
+    SERPAPI_API_KEY: str = ""
+    SEARCH_TIMEOUT_SECONDS: int = 15
+
     # CORS configuration
     CORS_ORIGINS: str = ""
 

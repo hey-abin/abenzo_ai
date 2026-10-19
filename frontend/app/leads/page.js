@@ -149,6 +149,7 @@ function LeadsContent() {
   const [selectedCandidates, setSelectedCandidates] = useState([]);
   const [importingDiscovered, setImportingDiscovered] = useState(false);
   const [discoveryStats, setDiscoveryStats] = useState(null);
+  const [discoveryDiagnostics, setDiscoveryDiagnostics] = useState(null);
 
   const loadLeads = () => {
     setLoading(true);
@@ -338,6 +339,7 @@ function LeadsContent() {
     setDiscoveryResults([]);
     setSelectedCandidates([]);
     setDiscoveryStats(null);
+    setDiscoveryDiagnostics(null);
     try {
       const res = await discoverLeads({
         niche: discoveryQuery.niche,
@@ -352,9 +354,11 @@ function LeadsContent() {
       });
       setDiscoveryResults(res.results || []);
       setDiscoveryLimitation(res.limitation_notice);
+      setDiscoveryDiagnostics(res.diagnostics || null);
       setDiscoveryStats({
         total_found: res.total_found,
-        source_mode: res.source_mode
+        source_mode: res.source_mode,
+        provider: res.provider
       });
       // Preselect non-duplicates
       const selectable = (res.results || [])
@@ -1260,6 +1264,38 @@ function LeadsContent() {
                 </div>
               ) : discoveryResults.length > 0 ? (
                 <div className="space-y-3">
+                  {discoveryDiagnostics && (
+                    <div className="rounded-md bg-zinc-100/80 px-3 py-1.5 text-[11px] text-zinc-600 dark:bg-zinc-800/60 dark:text-zinc-300 flex flex-wrap items-center justify-between gap-2 border border-zinc-200/60 dark:border-zinc-700/60">
+                      <div className="flex items-center gap-1.5">
+                        <span className="font-semibold text-zinc-800 dark:text-zinc-200">
+                          Provider: {discoveryDiagnostics.provider_used || "DuckDuckGo"}
+                        </span>
+                        {discoveryDiagnostics.fallback_used && (
+                          <span className="rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-300">
+                            Secondary Fallback Active
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-2 text-[10px] text-zinc-500 dark:text-zinc-400">
+                        <span>{discoveryDiagnostics.raw_results_count} raw fetched</span>
+                        <span>•</span>
+                        <span className="text-emerald-600 dark:text-emerald-400 font-semibold">{discoveryResults.length} verified profiles</span>
+                        {discoveryDiagnostics.rejected_counts?.non_profile_path > 0 && (
+                          <>
+                            <span>•</span>
+                            <span>{discoveryDiagnostics.rejected_counts.non_profile_path} posts/reels rejected</span>
+                          </>
+                        )}
+                        {discoveryDiagnostics.duplicates_removed > 0 && (
+                          <>
+                            <span>•</span>
+                            <span>{discoveryDiagnostics.duplicates_removed} duplicates removed</span>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
                   <div className="flex items-center justify-between text-xs text-zinc-500 border-b border-zinc-100 pb-2 dark:border-zinc-800">
                     <div className="flex items-center gap-2">
                       <button
@@ -1426,11 +1462,88 @@ function LeadsContent() {
                     })}
                   </div>
                 </div>
+              ) : discoveryDiagnostics && discoveryDiagnostics.provider_status === "rate_limited_202" ? (
+                /* Condition A: Provider Rate-Limited / Bot Challenged (HTTP 202) */
+                <div className="p-6 text-left text-xs bg-amber-50/60 rounded-lg border border-amber-300/80 dark:bg-amber-950/30 dark:border-amber-700/60 space-y-3">
+                  <div className="flex items-start gap-2.5">
+                    <AlertTriangle className="h-5 w-5 text-amber-600 shrink-0 mt-0.5" />
+                    <div>
+                      <h4 className="font-bold text-amber-950 dark:text-amber-200 text-sm">
+                        Search Provider Rate-Limited / Bot Challenge (HTTP 202)
+                      </h4>
+                      <p className="mt-1 text-amber-900/90 dark:text-amber-300/90 leading-relaxed">
+                        DuckDuckGo challenged automated queries from this server&apos;s IP address. No raw results could be inspected.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="rounded-md bg-amber-100/70 p-3 text-[11px] text-amber-950 dark:bg-amber-900/40 dark:text-amber-200 border border-amber-300/60">
+                    <p className="font-semibold mb-1">💡 Solution for Uninterrupted Discovery on Cloud Servers:</p>
+                    <p className="leading-relaxed">
+                      Datacenter hosting platforms (like Render) are frequently challenged by DuckDuckGo. To enable guaranteed, fast discovery, set a secondary search provider API key in your environment variables:
+                    </p>
+                    <ul className="list-disc list-inside mt-1.5 space-y-0.5 font-mono text-[10px]">
+                      <li><strong className="font-sans">Google via Serper:</strong> SERPER_API_KEY (2,500 free queries at serper.dev)</li>
+                      <li><strong className="font-sans">Tavily AI Search:</strong> TAVILY_API_KEY (1,000 free queries at tavily.com)</li>
+                      <li><strong className="font-sans">Brave Search:</strong> BRAVE_SEARCH_API_KEY (2,000 free queries at brave.com)</li>
+                    </ul>
+                  </div>
+
+                  {discoveryDiagnostics.queries_executed?.length > 0 && (
+                    <div className="text-[11px] text-zinc-500 dark:text-zinc-400">
+                      <strong>Attempted Queries:</strong> {discoveryDiagnostics.queries_executed.join(" • ")}
+                    </div>
+                  )}
+                </div>
+              ) : discoveryDiagnostics && discoveryDiagnostics.raw_results_count > 0 && discoveryDiagnostics.valid_profiles_count === 0 ? (
+                /* Condition B: Raw Results Received but Rejected by Validation */
+                <div className="p-6 text-left text-xs bg-indigo-50/50 rounded-lg border border-indigo-200/80 dark:bg-indigo-950/20 dark:border-indigo-800/60 space-y-3">
+                  <div className="flex items-start gap-2.5">
+                    <Filter className="h-5 w-5 text-indigo-600 shrink-0 mt-0.5" />
+                    <div>
+                      <h4 className="font-bold text-indigo-950 dark:text-indigo-200 text-sm">
+                        Results Received but Rejected by Profile Validation
+                      </h4>
+                      <p className="mt-1 text-indigo-900/90 dark:text-indigo-300/90 leading-relaxed">
+                        The search provider returned {discoveryDiagnostics.raw_results_count} results, but none passed strict validation for genuine, individual business Instagram profiles.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1 text-center">
+                    <div className="p-2 rounded bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700">
+                      <div className="text-base font-bold text-zinc-900 dark:text-zinc-100">{discoveryDiagnostics.raw_results_count}</div>
+                      <div className="text-[10px] text-zinc-500">Raw Results</div>
+                    </div>
+                    <div className="p-2 rounded bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700">
+                      <div className="text-base font-bold text-rose-600 dark:text-rose-400">{discoveryDiagnostics.rejected_counts?.non_profile_path || 0}</div>
+                      <div className="text-[10px] text-zinc-500">Posts / Reels / Popular</div>
+                    </div>
+                    <div className="p-2 rounded bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700">
+                      <div className="text-base font-bold text-amber-600 dark:text-amber-400">{discoveryDiagnostics.rejected_counts?.aggregator_or_listicle || 0}</div>
+                      <div className="text-[10px] text-zinc-500">Directories / Listicles</div>
+                    </div>
+                    <div className="p-2 rounded bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700">
+                      <div className="text-base font-bold text-indigo-600 dark:text-indigo-400">{discoveryDiagnostics.duplicates_removed || 0}</div>
+                      <div className="text-[10px] text-zinc-500">Duplicates / In CRM</div>
+                    </div>
+                  </div>
+
+                  <p className="text-[11px] text-zinc-500 dark:text-zinc-400 pt-1">
+                    Tip: Try searching for a specific niche category (e.g. &ldquo;Clothing Boutiques&rdquo; or &ldquo;Cafes & Roasteries&rdquo;) or switch from &ldquo;Instagram Profiles Only&rdquo; to &ldquo;All Public Business Sources&rdquo;.
+                  </p>
+                </div>
               ) : discoveryLimitation ? (
-                <div className="p-8 text-center text-xs text-zinc-600 dark:text-zinc-400 bg-amber-50/50 rounded-lg border border-amber-200/50 dark:bg-amber-950/20 dark:border-amber-800/30">
-                  <Info className="h-6 w-6 text-amber-500 mx-auto mb-2" />
+                /* Condition C: Provider Returned Zero Results */
+                <div className="p-6 text-center text-xs text-zinc-600 dark:text-zinc-400 bg-zinc-50/70 rounded-lg border border-zinc-200 dark:bg-zinc-800/40 dark:border-zinc-700/60 space-y-2">
+                  <Info className="h-6 w-6 text-zinc-400 mx-auto" />
                   <p className="font-semibold text-zinc-800 dark:text-zinc-200">{discoveryLimitation}</p>
-                  <p className="mt-1 text-[11px] text-zinc-500">
+                  {discoveryDiagnostics?.queries_executed?.length > 0 && (
+                    <p className="text-[11px] text-zinc-400">
+                      Queries executed: {discoveryDiagnostics.queries_executed.join(" • ")}
+                    </p>
+                  )}
+                  <p className="text-[11px] text-zinc-500">
                     Tip: Try selecting one of the popular quick niches (e.g. &ldquo;Clothing Boutiques&rdquo; or &ldquo;Cafes & Roasteries&rdquo;) or switch to &ldquo;All Public Business Sources&rdquo;.
                   </p>
                 </div>

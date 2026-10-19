@@ -433,8 +433,9 @@ async def discover_public_leads(query_in: LeadDiscoveryQuery):
                 results=[],
                 total_found=0,
                 source_mode=query_in.source_mode or "instagram_only",
-                limitation_notice=None,
-                error_message=str(e)
+                limitation_notice="Discovery search encountered an error. Please adjust criteria or retry.",
+                error_message=str(e),
+                diagnostics=None
             )
 
 @router.post("/import-discovered")

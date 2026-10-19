@@ -221,6 +221,26 @@ class LeadDiscoveryItem(BaseModel):
     discovered_at: Optional[str] = ""
     provider_source: Optional[str] = ""
 
+class DiscoveryDiagnostics(BaseModel):
+    queries_executed: List[str] = []
+    raw_results_count: int = 0
+    instagram_urls_count: int = 0
+    rejected_counts: Dict[str, int] = {
+        "non_profile_path": 0,
+        "aggregator_or_listicle": 0,
+        "invalid_username": 0,
+        "other": 0
+    }
+    valid_profiles_count: int = 0
+    duplicates_removed: int = 0
+    provider_errors: int = 0
+    timeouts: int = 0
+    rate_limits: int = 0
+    provider_status: str = "ok"  # 'ok', 'rate_limited_202', 'timeout', 'error', 'no_results'
+    provider_used: str = ""
+    provider_error_message: Optional[str] = None
+    fallback_used: bool = False
+
 class LeadDiscoveryResponse(BaseModel):
     status: str
     query: str
@@ -230,6 +250,7 @@ class LeadDiscoveryResponse(BaseModel):
     source_mode: Optional[str] = "instagram_only"
     limitation_notice: Optional[str] = None
     error_message: Optional[str] = None
+    diagnostics: Optional[DiscoveryDiagnostics] = None
 
 class ImportDiscoveredRequest(BaseModel):
     items: List[LeadDiscoveryItem]

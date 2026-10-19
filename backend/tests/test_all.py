@@ -1668,6 +1668,276 @@ def test_search_provider_limitations_shown_honestly_without_fabrication(monkeypa
     assert "0 verified profiles" in data["limitation_notice"]
 
 
+def test_regression_successful_results_with_valid_instagram_business_profiles(monkeypatch):
+    """
+    Regression Test 1: Successful results containing valid Instagram business profiles.
+    Verifies that valid profiles are parsed, verified, scored, and returned with diagnostics.
+    """
+    from backend.app.services.discovery_service import DuckDuckGoSearchProvider
+
+    mock_raw_items = [
+        {
+            "raw_title": "Kirthi The Boutique (@kirthi_kochi) • Instagram photos and videos",
+            "target_url": "https://www.instagram.com/kirthi_kochi/",
+            "snippet": "Designer wear, bridal couture, custom stitching in Panampilly Nagar, Kochi. WhatsApp: +91 9847112233"
+        },
+        {
+            "raw_title": "S.H.E Boutique (@s.h.e_designer) • Instagram photos and videos",
+            "target_url": "https://instagram.com/s.h.e_designer",
+            "snippet": "Handcrafted sarees and kurthis in Kochi, Kerala. Inquiries via DM or WhatsApp: +91 9846001122"
+        }
+    ]
+
+    async def mock_ddg_search(self, queries, limit, source_mode, diagnostics):
+        diagnostics["queries_executed"].extend(queries)
+        diagnostics["raw_results_count"] += len(mock_raw_items)
+        return mock_raw_items
+
+    monkeypatch.setattr(DuckDuckGoSearchProvider, "search", mock_ddg_search)
+
+    resp = client.post("/api/leads/discover", json={
+        "niche": "clothing boutiques",
+        "city_or_state": "kochi, kerala",
+        "source_mode": "instagram_only"
+    })
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "success"
+    assert data["total_found"] == 2
+    assert len(data["results"]) == 2
+
+    first = data["results"][0]
+    assert first["business_name"] == "Kirthi The Boutique"
+    assert first["instagram_username"] == "kirthi_kochi"
+    assert first["instagram_url"] == "https://instagram.com/kirthi_kochi"
+    assert "+919847112233" in first["contact_details"]
+    assert first["website_status"] == "no_website"
+    assert first["lead_score"] >= 65
+
+    # Structured diagnostics verified
+    diag = data["diagnostics"]
+    assert diag is not None
+    assert diag["valid_profiles_count"] == 2
+    assert diag["raw_results_count"] == 2
+    assert len(diag["queries_executed"]) >= 1
+
+
+def test_regression_url_normalization_and_valid_profile_acceptance():
+    """
+    Regression Test 2: URL normalization and valid profile acceptance.
+    Verifies location normalizer and profile classifier with standard and www formats.
+    """
+    from backend.app.services.discovery_service import (
+        normalize_location_input,
+        classify_instagram_url,
+        is_valid_instagram_profile_url
+    )
+
+    # Location normalization
+    loc_kerala = normalize_location_input("kerala")
+    assert loc_kerala["city"] == ""
+    assert loc_kerala["state"] == "Kerala"
+
+    loc_india_suffix = normalize_location_input("Kerala, India")
+    assert loc_india_suffix["city"] == ""
+    assert loc_india_suffix["state"] == "Kerala"
+
+    loc_kochi_compound = normalize_location_input("kochi, kerala")
+    assert loc_kochi_compound["city"] == "Kochi"
+    assert loc_kochi_compound["state"] == "Kerala"
+    assert "Cochin" in loc_kochi_compound["aliases"]
+
+    loc_city_only = normalize_location_input("Kochi")
+    assert loc_city_only["city"] == "Kochi"
+    assert loc_city_only["state"] == "Kerala"
+
+    # URL normalization and validation (standard + www + parameters + trailing slashes)
+    test_urls = [
+        ("https://instagram.com/myboutique", "myboutique"),
+        ("https://www.instagram.com/myboutique/", "myboutique"),
+        ("https://www.instagram.com/my_boutique_official/?hl=en", "my_boutique_official"),
+        ("http://instagram.com/my.boutique", "my.boutique"),
+    ]
+    for url, expected_user in test_urls:
+        valid, user, reason = classify_instagram_url(url)
+        assert valid is True
+        assert user == expected_user
+        assert reason == ""
+
+        # Backward compatibility 2-tuple function
+        v2, u2 = is_valid_instagram_profile_url(url)
+        assert v2 is True
+        assert u2 == expected_user
+
+
+def test_regression_rejection_of_posts_reels_and_irrelevant_articles():
+    """
+    Regression Test 3: Rejection of posts, reels, popular pages, directories, and irrelevant articles.
+    """
+    from backend.app.services.discovery_service import (
+        classify_instagram_url,
+        extract_root_domain,
+        AGGREGATOR_LISTICLE_DOMAINS,
+        LISTICLE_TITLE_PATTERNS
+    )
+    import re
+
+    # Non-profile Instagram URLs must be rejected with 'reserved_path'
+    rejected_urls = [
+        "https://www.instagram.com/p/DF7654321/",
+        "https://www.instagram.com/reel/C89abcde/",
+        "https://www.instagram.com/reels/fashion/",
+        "https://www.instagram.com/stories/daily_updates/",
+        "https://www.instagram.com/explore/tags/kochiboutique/",
+        "https://www.instagram.com/popular/best-boutiques-in-kochi/",
+        "https://www.instagram.com/directory/profiles/",
+        "https://www.instagram.com/accounts/login/",
+        "https://www.instagram.com/about/jobs/",
+    ]
+    for u in rejected_urls:
+        valid, _, reason = classify_instagram_url(u)
+        assert valid is False
+        assert reason == "reserved_path"
+
+    # Listicle and aggregator rejection
+    assert extract_root_domain("https://www.tripadvisor.in/Attractions-g297633.html") in AGGREGATOR_LISTICLE_DOMAINS
+    assert extract_root_domain("https://www.justdial.com/Kochi/Boutiques") in AGGREGATOR_LISTICLE_DOMAINS
+    assert extract_root_domain("https://dir.indiamart.com/kochi/boutique.html") in AGGREGATOR_LISTICLE_DOMAINS
+
+    listicle_titles = [
+        "Top 10 Best Boutiques in Kochi (2026 Guide)",
+        "15 Best Boutiques in Kerala for Wedding Shopping",
+        "List of Wholesale Suppliers and Boutiques in Ernakulam"
+    ]
+    for title in listicle_titles:
+        assert any(re.search(pat, title.lower()) for pat in LISTICLE_TITLE_PATTERNS)
+
+
+def test_regression_provider_failure_and_fallback_behavior(monkeypatch):
+    """
+    Regression Test 4: Provider failure and fallback behavior.
+    - When DuckDuckGo returns 202 bot challenge, records rate_limited_202 and rate_limits count.
+    - Seamlessly falls back to configured secondary provider (Serper).
+    """
+    from backend.app.services.discovery_service import DuckDuckGoSearchProvider, SerperSearchProvider
+
+    # 1. DuckDuckGo 202 rate-limited without secondary key
+    async def mock_ddg_202(self, queries, limit, source_mode, diagnostics):
+        diagnostics["queries_executed"].extend(queries)
+        diagnostics["rate_limits"] += 1
+        diagnostics["provider_status"] = "rate_limited_202"
+        diagnostics["provider_error_message"] = "DuckDuckGo returned HTTP 202 Bot Challenge from this server IP."
+        return []
+
+    monkeypatch.setattr(DuckDuckGoSearchProvider, "search", mock_ddg_202)
+    monkeypatch.setattr("backend.app.config.settings.SERPER_API_KEY", "")
+    monkeypatch.setattr("backend.app.config.settings.TAVILY_API_KEY", "")
+    monkeypatch.setattr("backend.app.config.settings.BRAVE_SEARCH_API_KEY", "")
+    monkeypatch.setattr("backend.app.config.settings.SERPAPI_API_KEY", "")
+
+    resp = client.post("/api/leads/discover", json={
+        "niche": "startups",
+        "city_or_state": "kerala",
+        "source_mode": "instagram_only"
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["total_found"] == 0
+    assert data["diagnostics"]["rate_limits"] >= 1
+    assert data["diagnostics"]["provider_status"] == "rate_limited_202"
+    assert "HTTP 202 Bot Challenge" in data["limitation_notice"]
+
+    # 2. DuckDuckGo 202 triggers fallback to configured Serper API
+    monkeypatch.setattr("backend.app.config.settings.SERPER_API_KEY", "dummy_serper_key_123")
+
+    mock_serper_items = [
+        {
+            "raw_title": "Kerala Tech Startup (@keralastartuphub) • Instagram",
+            "target_url": "https://www.instagram.com/keralastartuphub/",
+            "snippet": "Empowering early-stage startups in Kochi, Kerala. Inquiries: contact@keralastartup.in"
+        }
+    ]
+
+    async def mock_serper_search(self, queries, limit, source_mode, diagnostics):
+        diagnostics["queries_executed"].extend(queries)
+        diagnostics["raw_results_count"] += len(mock_serper_items)
+        return mock_serper_items
+
+    monkeypatch.setattr(SerperSearchProvider, "search", mock_serper_search)
+
+    resp_fb = client.post("/api/leads/discover", json={
+        "niche": "startups",
+        "city_or_state": "kerala",
+        "source_mode": "instagram_only"
+    })
+    assert resp_fb.status_code == 200
+    data_fb = resp_fb.json()
+    assert data_fb["total_found"] == 1
+    assert data_fb["results"][0]["instagram_username"] == "keralastartuphub"
+    assert data_fb["diagnostics"]["fallback_used"] is True
+    assert data_fb["diagnostics"]["provider_used"] == "Google (Serper API)"
+
+
+def test_regression_deduplication_and_empty_results(monkeypatch):
+    """
+    Regression Test 5: Deduplication across results and existing CRM records, and clean empty handling.
+    """
+    from backend.app.services.discovery_service import DuckDuckGoSearchProvider
+
+    # Pre-populate CRM with an existing lead
+    with get_db() as conn:
+        cursor = conn.cursor()
+        now = "2026-10-18T10:00:00"
+        cursor.execute("""
+            INSERT INTO leads (business_name, instagram_url, instagram_handle, created_at, updated_at)
+            VALUES ('Existing Boutique', 'https://instagram.com/existing_boutique', 'existing_boutique', ?, ?)
+        """, (now, now))
+        conn.commit()
+
+    # Provider returns: 1 duplicate in CRM, 1 internal duplicate, and 1 fresh prospect
+    mock_items = [
+        {
+            "raw_title": "Existing Boutique (@existing_boutique)",
+            "target_url": "https://www.instagram.com/existing_boutique/",
+            "snippet": "Existing shop in Kochi"
+        },
+        {
+            "raw_title": "Fresh Boutique (@fresh_boutique_kochi)",
+            "target_url": "https://www.instagram.com/fresh_boutique_kochi/",
+            "snippet": "New handcrafted fashion store in Kochi"
+        },
+        {
+            "raw_title": "Fresh Boutique Copy (@fresh_boutique_kochi)",
+            "target_url": "https://www.instagram.com/fresh_boutique_kochi/?hl=en",
+            "snippet": "Duplicate entry"
+        }
+    ]
+
+    async def mock_search(self, queries, limit, source_mode, diagnostics):
+        diagnostics["queries_executed"].extend(queries)
+        diagnostics["raw_results_count"] += len(mock_items)
+        return mock_items
+
+    monkeypatch.setattr(DuckDuckGoSearchProvider, "search", mock_search)
+
+    # Search with exclude_crm=True
+    resp = client.post("/api/leads/discover", json={
+        "niche": "boutiques",
+        "city_or_state": "kochi",
+        "source_mode": "instagram_only",
+        "exclude_crm": True
+    })
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["total_found"] == 1
+    assert data["results"][0]["instagram_username"] == "fresh_boutique_kochi"
+    # Duplicates removed must be at least 2 (1 internal duplicate + 1 CRM duplicate)
+    assert data["diagnostics"]["duplicates_removed"] >= 2
+
+
+
 
 
 
