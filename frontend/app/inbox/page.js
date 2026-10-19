@@ -8,12 +8,21 @@ import {
   Check, 
   CheckCircle, 
   AlertCircle, 
+  AlertTriangle,
   Plus, 
   RefreshCw, 
   ShieldAlert, 
   Send,
   User,
-  Info
+  Info,
+  Pause,
+  Play,
+  Briefcase,
+  Target,
+  Clock,
+  DollarSign,
+  ChevronDown,
+  ChevronUp
 } from "lucide-react";
 import InstagramIcon from "@/components/InstagramIcon";
 import { 
@@ -23,8 +32,18 @@ import {
   sendConversationReply,
   createSampleConversation, 
   fetchMetaStatus,
-  syncInstagramMessages
+  syncInstagramMessages,
+  updateConversation
 } from "@/lib/api";
+
+const CONVERSION_STAGES = [
+  { value: "lead", label: "Initial Inquiry" },
+  { value: "qualified_lead", label: "Qualified Lead" },
+  { value: "consultation_requested", label: "Consultation Requested" },
+  { value: "proposal_requested", label: "Proposal Requested" },
+  { value: "won", label: "Won (Client Closed)" },
+  { value: "lost", label: "Lost" },
+];
 
 export default function InboxPage() {
   const [conversations, setConversations] = useState([]);
@@ -37,6 +56,8 @@ export default function InboxPage() {
   const [syncing, setSyncing] = useState(false);
   const [metaStatus, setMetaStatus] = useState(null);
   const [filterNeedsHuman, setFilterNeedsHuman] = useState("all");
+  const [updatingConv, setUpdatingConv] = useState(false);
+  const [showLeadContext, setShowLeadContext] = useState(true);
 
   const loadInbox = () => {
     setLoading(true);
@@ -72,6 +93,49 @@ export default function InboxPage() {
       e.delivery_status === "draft_pending" || e.delivery_status === "approved" || e.delivery_status === "failed"
     );
     setEditedReply(activeEvent?.approved_text || activeEvent?.ai_draft || "");
+  };
+
+  const handleToggleAutoReply = async () => {
+    if (!selectedConv) return;
+    const newPaused = selectedConv.auto_reply_paused ? 0 : 1;
+    setUpdatingConv(true);
+    try {
+      const res = await updateConversation(selectedConv.id, { auto_reply_paused: newPaused });
+      setSelectedConv(res.conversation || res);
+      loadInbox();
+    } catch (err) {
+      alert("Failed to toggle auto-reply: " + err.message);
+    } finally {
+      setUpdatingConv(false);
+    }
+  };
+
+  const handleChangeConversionStage = async (newStage) => {
+    if (!selectedConv) return;
+    setUpdatingConv(true);
+    try {
+      const res = await updateConversation(selectedConv.id, { conversion_stage: newStage });
+      setSelectedConv(res.conversation || res);
+      loadInbox();
+    } catch (err) {
+      alert("Failed to update conversion stage: " + err.message);
+    } finally {
+      setUpdatingConv(false);
+    }
+  };
+
+  const handleResolveEscalation = async () => {
+    if (!selectedConv) return;
+    setUpdatingConv(true);
+    try {
+      const res = await updateConversation(selectedConv.id, { needs_human: 0 });
+      setSelectedConv(res.conversation || res);
+      loadInbox();
+    } catch (err) {
+      alert("Failed to resolve escalation: " + err.message);
+    } finally {
+      setUpdatingConv(false);
+    }
   };
 
   const handleApprove = async (eventId) => {
@@ -272,7 +336,16 @@ export default function InboxPage() {
 
                     <div className="mt-2 flex items-center justify-between text-[10px] text-zinc-400">
                       <span className="capitalize">{conv.platform.replace("_", " ")}</span>
-                      <span>Temp: {conv.lead_temperature}</span>
+                      <div className="flex items-center gap-1.5">
+                        {conv.auto_reply_paused ? (
+                          <span className="rounded bg-amber-50 px-1 py-0.5 text-[9px] font-semibold text-amber-600 border border-amber-200 dark:bg-amber-950/40 dark:text-amber-400">
+                            Human Takeover
+                          </span>
+                        ) : null}
+                        <span className="rounded bg-zinc-100 px-1 py-0.5 text-[9px] font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300 capitalize">
+                          {(conv.conversion_stage || "lead").replace("_", " ")}
+                        </span>
+                      </div>
                     </div>
                   </div>
                 );
@@ -286,26 +359,144 @@ export default function InboxPage() {
           {selectedConv ? (
             <div className="space-y-4">
               {/* Header */}
-              <div className="flex items-center justify-between border-b border-zinc-100 pb-3 dark:border-zinc-800">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between border-b border-zinc-100 pb-3 gap-3 dark:border-zinc-800">
                 <div>
                   <h2 className="text-base font-bold text-zinc-900 dark:text-zinc-100">
                     {selectedConv.contact_display_name}
                   </h2>
-                  <div className="flex items-center gap-2 text-xs text-zinc-500">
+                  <div className="flex flex-wrap items-center gap-2 text-xs text-zinc-500 mt-0.5">
                     <span className="capitalize">{selectedConv.platform.replace("_", " ")}</span>
                     <span>•</span>
                     <span>Lead Temperature: <strong className="text-zinc-800 dark:text-zinc-200">{selectedConv.lead_temperature}</strong></span>
+                    <span>•</span>
+                    <span className="flex items-center gap-1">
+                      Stage:
+                      <select
+                        value={selectedConv.conversion_stage || "lead"}
+                        onChange={(e) => handleChangeConversionStage(e.target.value)}
+                        disabled={updatingConv}
+                        className="rounded border border-zinc-200 bg-white px-1.5 py-0.5 text-[11px] font-medium text-zinc-800 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
+                      >
+                        {CONVERSION_STAGES.map((s) => (
+                          <option key={s.value} value={s.value}>{s.label}</option>
+                        ))}
+                      </select>
+                    </span>
                   </div>
                 </div>
 
-                {selectedConv.needs_human ? (
-                  <span className="rounded-full bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-700 border border-amber-200 dark:bg-amber-950/40 dark:text-amber-400 dark:border-amber-800">
-                    Human Review Required
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleToggleAutoReply}
+                    disabled={updatingConv}
+                    className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium border transition-colors ${
+                      selectedConv.auto_reply_paused
+                        ? "border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300"
+                        : "border-emerald-200 bg-emerald-50 text-emerald-800 hover:bg-emerald-100 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300"
+                    }`}
+                    title={selectedConv.auto_reply_paused ? "Resume automated AI responses for this user" : "Pause automated AI replies to take over manually"}
+                  >
+                    {selectedConv.auto_reply_paused ? (
+                      <>
+                        <Play className="h-3.5 w-3.5 text-amber-600" />
+                        <span>Resume Auto-Reply</span>
+                      </>
+                    ) : (
+                      <>
+                        <Pause className="h-3.5 w-3.5 text-emerald-600" />
+                        <span>Human Takeover (Pause AI)</span>
+                      </>
+                    )}
+                  </button>
+
+                  {selectedConv.needs_human ? (
+                    <span className="rounded-full bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-700 border border-amber-200 dark:bg-amber-950/40 dark:text-amber-400 dark:border-amber-800">
+                      Escalated
+                    </span>
+                  ) : (
+                    <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-700 border border-emerald-200 dark:bg-emerald-950/40 dark:text-emerald-400 dark:border-emerald-800">
+                      Normal
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              {/* Escalation Alert Banner */}
+              {selectedConv.needs_human ? (
+                <div className="rounded-md border border-amber-300 bg-amber-50/80 p-3 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 text-xs text-amber-900 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-200">
+                  <div className="flex items-center gap-2">
+                    <AlertTriangle className="h-4 w-4 text-amber-600 shrink-0" />
+                    <span>
+                      <strong>Escalation Alert:</strong> AI paused or requested attention due to objection, complex quote, or customer request.
+                    </span>
+                  </div>
+                  <button
+                    onClick={handleResolveEscalation}
+                    disabled={updatingConv}
+                    className="rounded bg-amber-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-amber-700 shrink-0"
+                  >
+                    Mark Resolved
+                  </button>
+                </div>
+              ) : null}
+
+              {/* Structured Lead Context Card */}
+              <div className="rounded-md border border-zinc-200 bg-zinc-50/70 p-3 text-xs dark:border-zinc-800 dark:bg-zinc-800/40">
+                <div 
+                  className="flex items-center justify-between cursor-pointer"
+                  onClick={() => setShowLeadContext(!showLeadContext)}
+                >
+                  <span className="font-semibold text-zinc-800 dark:text-zinc-200 flex items-center gap-1.5">
+                    <Target className="h-3.5 w-3.5 text-indigo-500" />
+                    Lead Discovery Context & Summary
                   </span>
-                ) : (
-                  <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-700 border border-emerald-200 dark:bg-emerald-950/40 dark:text-emerald-400 dark:border-emerald-800">
-                    Resolved / Approved
-                  </span>
+                  <button type="button" className="text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300">
+                    {showLeadContext ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+                  </button>
+                </div>
+                {showLeadContext && (
+                  <div className="mt-2.5 space-y-2 border-t border-zinc-200 pt-2 dark:border-zinc-700">
+                    {selectedConv.conversation_summary ? (
+                      <p className="text-zinc-600 dark:text-zinc-400 italic">
+                        "{selectedConv.conversation_summary}"
+                      </p>
+                    ) : (
+                      <p className="text-zinc-400 italic">No summary recorded yet. Extracted automatically during conversation.</p>
+                    )}
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-[11px] pt-1">
+                      <div className="rounded bg-white p-1.5 border border-zinc-100 dark:bg-zinc-800 dark:border-zinc-700">
+                        <span className="text-zinc-400 block text-[9px] uppercase font-medium">Service</span>
+                        <span className="font-medium text-zinc-800 dark:text-zinc-200">
+                          {selectedConv.lead_context?.requested_service || "Pending discovery"}
+                        </span>
+                      </div>
+                      <div className="rounded bg-white p-1.5 border border-zinc-100 dark:bg-zinc-800 dark:border-zinc-700">
+                        <span className="text-zinc-400 block text-[9px] uppercase font-medium">Business</span>
+                        <span className="font-medium text-zinc-800 dark:text-zinc-200">
+                          {selectedConv.lead_context?.business_type || "Pending discovery"}
+                        </span>
+                      </div>
+                      <div className="rounded bg-white p-1.5 border border-zinc-100 dark:bg-zinc-800 dark:border-zinc-700">
+                        <span className="text-zinc-400 block text-[9px] uppercase font-medium">Budget</span>
+                        <span className="font-medium text-zinc-800 dark:text-zinc-200">
+                          {selectedConv.lead_context?.budget || "Not volunteered"}
+                        </span>
+                      </div>
+                      <div className="rounded bg-white p-1.5 border border-zinc-100 dark:bg-zinc-800 dark:border-zinc-700">
+                        <span className="text-zinc-400 block text-[9px] uppercase font-medium">Timeline</span>
+                        <span className="font-medium text-zinc-800 dark:text-zinc-200">
+                          {selectedConv.lead_context?.timeline || "Flexible"}
+                        </span>
+                      </div>
+                      <div className="col-span-2 rounded bg-white p-1.5 border border-zinc-100 dark:bg-zinc-800 dark:border-zinc-700">
+                        <span className="text-zinc-400 block text-[9px] uppercase font-medium">Next Step</span>
+                        <span className="font-medium text-indigo-600 dark:text-indigo-400">
+                          {selectedConv.lead_context?.next_step || "Ask discovery question"}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
                 )}
               </div>
 

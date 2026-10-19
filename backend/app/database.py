@@ -300,6 +300,10 @@ def init_db(db_path: str = None):
             lead_temperature TEXT DEFAULT 'early',
             notes TEXT DEFAULT '',
             recipient_id TEXT DEFAULT '',
+            conversation_summary TEXT DEFAULT '',
+            lead_context_json TEXT DEFAULT '{{}}',
+            conversion_stage TEXT DEFAULT 'lead',
+            auto_reply_paused INTEGER DEFAULT 0,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             FOREIGN KEY (lead_id) REFERENCES leads(id) ON DELETE SET NULL
@@ -358,8 +362,15 @@ def init_db(db_path: str = None):
             # Query existing columns first to avoid unnecessary ALTER TABLE and ACCESS EXCLUSIVE locks
             cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'conversations'")
             conv_cols = {row[0] for row in cursor.fetchall()}
-            if "recipient_id" not in conv_cols:
-                cursor.execute("ALTER TABLE conversations ADD COLUMN recipient_id TEXT DEFAULT ''")
+            for col, col_def in (
+                ("recipient_id", "TEXT DEFAULT ''"),
+                ("conversation_summary", "TEXT DEFAULT ''"),
+                ("lead_context_json", "TEXT DEFAULT '{}'"),
+                ("conversion_stage", "TEXT DEFAULT 'lead'"),
+                ("auto_reply_paused", "INTEGER DEFAULT 0"),
+            ):
+                if col not in conv_cols:
+                    cursor.execute(f"ALTER TABLE conversations ADD COLUMN {col} {col_def}")
 
             cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'conversation_events'")
             event_cols = {row[0] for row in cursor.fetchall()}
@@ -384,8 +395,15 @@ def init_db(db_path: str = None):
             # SQLite uses PRAGMA table_info for migration detection
             cursor.execute("PRAGMA table_info(conversations)")
             conv_cols = [row[1] for row in cursor.fetchall()]
-            if "recipient_id" not in conv_cols:
-                cursor.execute("ALTER TABLE conversations ADD COLUMN recipient_id TEXT DEFAULT ''")
+            for col, col_def in (
+                ("recipient_id", "TEXT DEFAULT ''"),
+                ("conversation_summary", "TEXT DEFAULT ''"),
+                ("lead_context_json", "TEXT DEFAULT '{}'"),
+                ("conversion_stage", "TEXT DEFAULT 'lead'"),
+                ("auto_reply_paused", "INTEGER DEFAULT 0"),
+            ):
+                if col not in conv_cols:
+                    cursor.execute(f"ALTER TABLE conversations ADD COLUMN {col} {col_def}")
 
             cursor.execute("PRAGMA table_info(conversation_events)")
             event_cols = [row[1] for row in cursor.fetchall()]

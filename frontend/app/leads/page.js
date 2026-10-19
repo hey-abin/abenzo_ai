@@ -16,7 +16,10 @@ import {
   Trash2, 
   RefreshCw,
   AlertTriangle,
-  Info
+  Info,
+  Compass,
+  CheckSquare,
+  Square
 } from "lucide-react";
 import InstagramIcon from "@/components/InstagramIcon";
 import { 
@@ -27,7 +30,9 @@ import {
   checkWebsite, 
   qualifyLeadAI, 
   importCSV, 
-  getExportCSVUrl 
+  getExportCSVUrl,
+  discoverLeads,
+  importDiscoveredLeads
 } from "@/lib/api";
 
 const INDIAN_STATES = [
@@ -44,10 +49,11 @@ const WEBSITE_STATUS_COLORS = {
 
 const OUTREACH_STATUS_OPTIONS = [
   { value: "new", label: "New" },
-  { value: "draft_ready", label: "Draft Ready" },
-  { value: "approved", label: "Approved" },
-  { value: "sent_manually", label: "Sent Manually" },
+  { value: "draft", label: "Draft" },
+  { value: "reviewed", label: "Reviewed" },
+  { value: "contacted", label: "Contacted" },
   { value: "replied", label: "Replied" },
+  { value: "converted", label: "Converted" },
   { value: "not_interested", label: "Not Interested" },
   { value: "do_not_contact", label: "Do Not Contact (Opt-Out)" },
 ];
@@ -82,6 +88,20 @@ function LeadsContent() {
   // Selected lead for detail/edit
   const [selectedLead, setSelectedLead] = useState(null);
   const [editDraft, setEditDraft] = useState("");
+
+  // Lead Discovery state
+  const [showDiscoverModal, setShowDiscoverModal] = useState(false);
+  const [discoveryQuery, setDiscoveryQuery] = useState({
+    niche: "",
+    location: "Kerala",
+    keywords: ""
+  });
+  const [discovering, setDiscovering] = useState(false);
+  const [discoveryResults, setDiscoveryResults] = useState([]);
+  const [discoveryError, setDiscoveryError] = useState("");
+  const [selectedCandidates, setSelectedCandidates] = useState([]);
+  const [importingDiscovered, setImportingDiscovered] = useState(false);
+  const [discoveryStats, setDiscoveryStats] = useState(null);
 
   const loadLeads = () => {
     setLoading(true);
@@ -227,6 +247,79 @@ function LeadsContent() {
     e.target.value = "";
   };
 
+  const handleRunDiscovery = async (e) => {
+    e.preventDefault();
+    if (!discoveryQuery.niche.trim() && !discoveryQuery.keywords.trim()) {
+      setDiscoveryError("Please enter a niche or keywords to discover businesses.");
+      return;
+    }
+    setDiscovering(true);
+    setDiscoveryError("");
+    setDiscoveryResults([]);
+    setSelectedCandidates([]);
+    setDiscoveryStats(null);
+    try {
+      const res = await discoverLeads({
+        niche: discoveryQuery.niche,
+        location: discoveryQuery.location,
+        keywords: discoveryQuery.keywords,
+        limit: 10
+      });
+      setDiscoveryResults(res.results || []);
+      setDiscoveryStats({
+        total_found: res.total_found,
+        execution_time_ms: res.execution_time_ms,
+        message: res.message
+      });
+      // Preselect non-duplicates
+      const selectable = (res.results || [])
+        .map((r, i) => (!r.is_duplicate ? i : null))
+        .filter((i) => i !== null);
+      setSelectedCandidates(selectable);
+    } catch (err) {
+      setDiscoveryError(err.message || "Discovery search failed");
+    } finally {
+      setDiscovering(false);
+    }
+  };
+
+  const handleToggleCandidate = (index) => {
+    if (selectedCandidates.includes(index)) {
+      setSelectedCandidates(selectedCandidates.filter((i) => i !== index));
+    } else {
+      setSelectedCandidates([...selectedCandidates, index]);
+    }
+  };
+
+  const handleSelectAllCandidates = () => {
+    const selectable = discoveryResults
+      .map((r, i) => (!r.is_duplicate ? i : null))
+      .filter((i) => i !== null);
+    if (selectedCandidates.length === selectable.length) {
+      setSelectedCandidates([]);
+    } else {
+      setSelectedCandidates(selectable);
+    }
+  };
+
+  const handleImportCandidates = async () => {
+    if (selectedCandidates.length === 0) return;
+    const itemsToImport = selectedCandidates.map((idx) => discoveryResults[idx]);
+    setImportingDiscovered(true);
+    try {
+      const res = await importDiscoveredLeads(itemsToImport);
+      alert(`Successfully imported ${res.imported_count} leads (${res.skipped_count} skipped). Website verification and AI qualification are ready.`);
+      setShowDiscoverModal(false);
+      setDiscoveryResults([]);
+      setSelectedCandidates([]);
+      loadLeads();
+    } catch (err) {
+      alert("Failed to import discovered leads: " + err.message);
+    } finally {
+      setImportingDiscovered(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       {/* Top Header */}
@@ -255,6 +348,15 @@ function LeadsContent() {
             <Download className="h-3.5 w-3.5" />
             Export CSV
           </a>
+
+          {/* Discover Leads Modal Button */}
+          <button
+            onClick={() => setShowDiscoverModal(true)}
+            className="inline-flex items-center gap-1.5 rounded-md border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-xs font-medium text-indigo-700 hover:bg-indigo-100 dark:border-indigo-800 dark:bg-indigo-950/40 dark:text-indigo-300"
+          >
+            <Compass className="h-3.5 w-3.5" />
+            Discover Leads (Live)
+          </button>
 
           {/* Add Lead */}
           <button
@@ -613,16 +715,28 @@ function LeadsContent() {
                 </div>
                 <div className="flex flex-wrap gap-1.5">
                   <button
-                    onClick={() => handleStatusChange(selectedLead.id, "sent_manually")}
+                    onClick={() => handleStatusChange(selectedLead.id, "reviewed")}
                     className="rounded bg-zinc-100 px-2 py-1 text-[10px] font-medium text-zinc-700 hover:bg-zinc-200 dark:bg-zinc-800 dark:text-zinc-300"
                   >
-                    Mark Sent Manually
+                    Mark Reviewed
+                  </button>
+                  <button
+                    onClick={() => handleStatusChange(selectedLead.id, "contacted")}
+                    className="rounded bg-blue-100 px-2 py-1 text-[10px] font-medium text-blue-800 hover:bg-blue-200 dark:bg-blue-950/60 dark:text-blue-300"
+                  >
+                    Mark Contacted
                   </button>
                   <button
                     onClick={() => handleStatusChange(selectedLead.id, "replied")}
-                    className="rounded bg-emerald-100 px-2 py-1 text-[10px] font-medium text-emerald-800 hover:bg-emerald-200 dark:bg-emerald-950/60 dark:text-emerald-300"
+                    className="rounded bg-purple-100 px-2 py-1 text-[10px] font-medium text-purple-800 hover:bg-purple-200 dark:bg-purple-950/60 dark:text-purple-300"
                   >
                     Mark Replied
+                  </button>
+                  <button
+                    onClick={() => handleStatusChange(selectedLead.id, "converted")}
+                    className="rounded bg-emerald-100 px-2 py-1 text-[10px] font-medium text-emerald-800 hover:bg-emerald-200 dark:bg-emerald-950/60 dark:text-emerald-300"
+                  >
+                    Mark Converted
                   </button>
                   <button
                     onClick={() => handleStatusChange(selectedLead.id, "do_not_contact")}
@@ -755,6 +869,259 @@ function LeadsContent() {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Discover Leads Modal */}
+      {showDiscoverModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 overflow-y-auto">
+          <div className="w-full max-w-4xl max-h-[90vh] flex flex-col rounded-xl bg-white shadow-2xl dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 overflow-hidden">
+            {/* Modal Header */}
+            <div className="p-5 border-b border-zinc-100 dark:border-zinc-800 flex items-center justify-between bg-zinc-50/50 dark:bg-zinc-800/40">
+              <div>
+                <h2 className="text-lg font-bold text-zinc-900 dark:text-zinc-100 flex items-center gap-2">
+                  <Compass className="h-5 w-5 text-indigo-600 dark:text-indigo-400" />
+                  Live Business & Lead Discovery
+                </h2>
+                <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
+                  Search public web listings and directories by niche & location. Automatically checks website availability, deduplicates against CRM, and scores service fit.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowDiscoverModal(false)}
+                className="rounded-md p-1.5 text-zinc-400 hover:bg-zinc-200 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Discovery Query Form */}
+            <div className="p-5 border-b border-zinc-100 dark:border-zinc-800 bg-white dark:bg-zinc-900">
+              <form onSubmit={handleRunDiscovery} className="grid grid-cols-1 sm:grid-cols-4 gap-3 text-xs">
+                <div className="sm:col-span-1">
+                  <label className="block font-medium text-zinc-700 dark:text-zinc-300 mb-1">
+                    Niche / Category *
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="e.g. Boutique Hotel, Dentist"
+                    value={discoveryQuery.niche}
+                    onChange={(e) => setDiscoveryQuery({ ...discoveryQuery, niche: e.target.value })}
+                    className="w-full rounded border border-zinc-300 p-2 text-xs dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                  />
+                </div>
+
+                <div className="sm:col-span-1">
+                  <label className="block font-medium text-zinc-700 dark:text-zinc-300 mb-1">
+                    City / State
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="e.g. Kochi, Kerala or Bangalore"
+                    value={discoveryQuery.location}
+                    onChange={(e) => setDiscoveryQuery({ ...discoveryQuery, location: e.target.value })}
+                    className="w-full rounded border border-zinc-300 p-2 text-xs dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                  />
+                </div>
+
+                <div className="sm:col-span-1">
+                  <label className="block font-medium text-zinc-700 dark:text-zinc-300 mb-1">
+                    Keywords (Optional)
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="e.g. appointment, booking, store"
+                    value={discoveryQuery.keywords}
+                    onChange={(e) => setDiscoveryQuery({ ...discoveryQuery, keywords: e.target.value })}
+                    className="w-full rounded border border-zinc-300 p-2 text-xs dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                  />
+                </div>
+
+                <div className="sm:col-span-1 flex items-end">
+                  <button
+                    type="submit"
+                    disabled={discovering}
+                    className="w-full inline-flex items-center justify-center gap-1.5 rounded bg-indigo-600 py-2 px-3 text-xs font-medium text-white hover:bg-indigo-700 disabled:opacity-50 transition-colors"
+                  >
+                    <Search className={`h-3.5 w-3.5 ${discovering ? "animate-spin" : ""}`} />
+                    {discovering ? "Scanning Web..." : "Discover Leads"}
+                  </button>
+                </div>
+              </form>
+
+              {discoveryError && (
+                <div className="mt-3 rounded bg-red-50 p-2.5 text-xs text-red-700 border border-red-200 dark:bg-red-950/40 dark:border-red-800 dark:text-red-400">
+                  {discoveryError}
+                </div>
+              )}
+            </div>
+
+            {/* Results Area */}
+            <div className="flex-1 overflow-y-auto p-5 space-y-3 min-h-[240px]">
+              {discovering ? (
+                <div className="flex flex-col items-center justify-center py-12 text-center text-zinc-500 space-y-3">
+                  <RefreshCw className="h-8 w-8 animate-spin text-indigo-500" />
+                  <div>
+                    <p className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">
+                      Querying Public Directories & Search Engines...
+                    </p>
+                    <p className="text-xs text-zinc-400 mt-1">
+                      Filtering public listings, testing live reachability, and evaluating prospect fit criteria.
+                    </p>
+                  </div>
+                </div>
+              ) : discoveryResults.length > 0 ? (
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between text-xs text-zinc-500 border-b border-zinc-100 pb-2 dark:border-zinc-800">
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={handleSelectAllCandidates}
+                        className="text-indigo-600 hover:text-indigo-800 dark:text-indigo-400 font-medium text-xs flex items-center gap-1"
+                      >
+                        <CheckSquare className="h-3.5 w-3.5" />
+                        Select / Unselect All Eligible
+                      </button>
+                      <span>•</span>
+                      <span>{discoveryResults.length} prospects discovered ({discoveryStats?.execution_time_ms}ms)</span>
+                    </div>
+                    <span>{selectedCandidates.length} of {discoveryResults.filter(r => !r.is_duplicate).length} selected</span>
+                  </div>
+
+                  <div className="space-y-2">
+                    {discoveryResults.map((item, idx) => {
+                      const isSelected = selectedCandidates.includes(idx);
+                      return (
+                        <div
+                          key={idx}
+                          onClick={() => !item.is_duplicate && handleToggleCandidate(idx)}
+                          className={`rounded-lg border p-3.5 transition-colors text-xs ${
+                            item.is_duplicate
+                              ? "border-zinc-200 bg-zinc-50/50 opacity-60 dark:border-zinc-800 dark:bg-zinc-800/20 cursor-not-allowed"
+                              : isSelected
+                              ? "border-indigo-300 bg-indigo-50/40 dark:border-indigo-800 dark:bg-indigo-950/20 cursor-pointer"
+                              : "border-zinc-200 bg-white hover:bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900 cursor-pointer"
+                          }`}
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="flex items-start gap-2.5">
+                              <input
+                                type="checkbox"
+                                checked={isSelected}
+                                disabled={item.is_duplicate}
+                                onChange={() => handleToggleCandidate(idx)}
+                                onClick={(e) => e.stopPropagation()}
+                                className="mt-1 rounded text-indigo-600 focus:ring-indigo-500"
+                              />
+                              <div>
+                                <div className="flex items-center gap-2">
+                                  <h3 className="font-bold text-zinc-900 dark:text-zinc-100 text-sm">
+                                    {item.business_name}
+                                  </h3>
+                                  {item.is_duplicate && (
+                                    <span className="rounded bg-zinc-200 px-1.5 py-0.5 text-[10px] font-medium text-zinc-700 dark:bg-zinc-700 dark:text-zinc-300">
+                                      Already in CRM
+                                    </span>
+                                  )}
+                                  <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${
+                                    item.reachable
+                                      ? "bg-emerald-50 text-emerald-700 border border-emerald-200 dark:bg-emerald-950/40 dark:text-emerald-400 dark:border-emerald-800"
+                                      : "bg-amber-50 text-amber-700 border border-amber-200 dark:bg-amber-950/40 dark:text-amber-400 dark:border-amber-800"
+                                  }`}>
+                                    {item.reachable ? "Reachable" : `Unreachable (${item.status_code || "timeout"})`}
+                                  </span>
+                                </div>
+
+                                <div className="flex flex-wrap items-center gap-3 text-zinc-500 mt-1 text-[11px]">
+                                  {item.website_url && (
+                                    <a
+                                      href={item.website_url}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      onClick={(e) => e.stopPropagation()}
+                                      className="text-blue-600 hover:underline dark:text-blue-400 inline-flex items-center gap-1"
+                                    >
+                                      <Globe className="h-3 w-3" />
+                                      {item.domain}
+                                      <ExternalLink className="h-2.5 w-2.5" />
+                                    </a>
+                                  )}
+                                  {item.public_phone && <span>📞 {item.public_phone}</span>}
+                                  {item.public_email && <span>✉️ {item.public_email}</span>}
+                                </div>
+
+                                <p className="text-zinc-600 dark:text-zinc-400 mt-1.5 line-clamp-2 text-[11px]">
+                                  {item.snippet}
+                                </p>
+
+                                {item.score_reasons && item.score_reasons.length > 0 && (
+                                  <div className="mt-2 flex flex-wrap gap-1">
+                                    {item.score_reasons.map((reason, rIdx) => (
+                                      <span key={rIdx} className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
+                                        ✓ {reason}
+                                      </span>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+
+                            <div className="text-right shrink-0">
+                              <div className="flex items-center justify-end gap-1">
+                                <span className="text-base font-bold text-indigo-600 dark:text-indigo-400">
+                                  {item.lead_score}
+                                </span>
+                                <span className="text-[10px] text-zinc-400">/100</span>
+                              </div>
+                              <span className="text-[10px] text-zinc-400 block">Fit Score</span>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              ) : discoveryStats ? (
+                <div className="p-12 text-center text-xs text-zinc-500">
+                  No public businesses found matching this query. Try a broader niche or general city/state keywords.
+                </div>
+              ) : (
+                <div className="p-12 text-center text-xs text-zinc-500">
+                  Enter a niche (e.g. &ldquo;Boutique Hotel&rdquo; or &ldquo;Dentist&rdquo;) and a location above, then click &ldquo;Discover Leads&rdquo; to scan public business directories.
+                </div>
+              )}
+            </div>
+
+            {/* Modal Footer */}
+            <div className="p-4 border-t border-zinc-100 dark:border-zinc-800 bg-zinc-50/50 dark:bg-zinc-800/40 flex items-center justify-between">
+              <span className="text-xs text-zinc-500">
+                {selectedCandidates.length > 0
+                  ? `${selectedCandidates.length} eligible prospect${selectedCandidates.length > 1 ? "s" : ""} selected for import.`
+                  : "Select prospects above to import into CRM."}
+              </span>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowDiscoverModal(false)}
+                  className="rounded border border-zinc-300 px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-300"
+                >
+                  Close
+                </button>
+                <button
+                  type="button"
+                  onClick={handleImportCandidates}
+                  disabled={selectedCandidates.length === 0 || importingDiscovered}
+                  className="rounded bg-indigo-600 px-4 py-1.5 text-xs font-medium text-white hover:bg-indigo-700 disabled:opacity-50 transition-colors"
+                >
+                  {importingDiscovered
+                    ? "Importing & Qualifying..."
+                    : `Import Selected (${selectedCandidates.length})`}
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}

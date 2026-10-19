@@ -5,10 +5,17 @@ from datetime import datetime
 from fastapi import APIRouter, HTTPException, Query, UploadFile, File, Response
 from typing import Optional, List
 from backend.app.database import get_db
-from backend.app.schemas import LeadCreate, LeadUpdate, LeadResponse
+from backend.app.schemas import (
+    LeadCreate,
+    LeadUpdate,
+    LeadResponse,
+    LeadDiscoveryQuery,
+    LeadDiscoveryResponse,
+    ImportDiscoveredRequest
+)
 from backend.app.services.website_checker import check_website
 from backend.app.services.ollama_service import qualify_lead_with_ai
-from backend.app.services.discovery_service import check_duplicate_lead
+from backend.app.services.discovery_service import check_duplicate_lead, execute_lead_discovery
 
 router = APIRouter(prefix="/leads", tags=["leads"])
 
@@ -361,3 +368,149 @@ def export_leads_csv():
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=abenzo_leads.csv"}
     )
+
+@router.post("/discover", response_model=LeadDiscoveryResponse)
+async def discover_public_leads(query_in: LeadDiscoveryQuery):
+    """
+    Discovers publicly listed businesses via real public search and directories.
+    Never fabricates results.
+    """
+    niche = (query_in.niche or "").strip()
+    city_or_state = (query_in.city_or_state or "").strip()
+    keywords = (query_in.keywords or "").strip()
+    limit = max(1, min(query_in.limit or 10, 25))
+
+    if not niche and not keywords:
+        raise HTTPException(status_code=400, detail="Please enter a business niche or search keywords.")
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        try:
+            res = await execute_lead_discovery(cursor, niche=niche, city_or_state=city_or_state, keywords=keywords, limit=limit)
+            return LeadDiscoveryResponse(**res)
+        except Exception as e:
+            return LeadDiscoveryResponse(
+                status="error",
+                query=f"{niche} in {city_or_state} {keywords}".strip(),
+                provider="Public Directory Search",
+                results=[],
+                total_found=0,
+                error_message=str(e)
+            )
+
+@router.post("/import-discovered")
+async def import_discovered_leads(payload: ImportDiscoveredRequest):
+    """
+    Imports selected discovered prospects into the CRM, tests their websites,
+    and generates AI lead scoring and personalized cold outreach drafts for human review.
+    """
+    imported_leads = []
+    skipped = 0
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT value FROM app_settings WHERE key = 'business_profile'")
+        prof_row = cursor.fetchone()
+        agency_profile = json.loads(prof_row["value"]) if prof_row else {}
+
+    for item in payload.items:
+        now = datetime.now().isoformat()
+        lead_id = None
+
+        with get_db() as conn:
+            cursor = conn.cursor()
+            dup = check_duplicate_lead(cursor, item.business_name, item.website_url, item.instagram_url)
+            if dup:
+                skipped += 1
+                continue
+
+            cursor.execute("""
+                INSERT INTO leads (
+                    business_name, industry, state, source_url, instagram_url, website_url,
+                    website_status, evidence_json, outreach_status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 'uncertain', ?, 'new', ?, ?)
+            """, (
+                item.business_name.strip(),
+                item.industry.strip(),
+                item.state.strip(),
+                item.source_url.strip(),
+                item.instagram_url.strip(),
+                item.website_url.strip(),
+                json.dumps({"snippet": item.snippet, "contact": item.contact_details}),
+                now,
+                now
+            ))
+            lead_id = cursor.lastrowid
+            conn.commit()
+
+        # Check website if website_url is present
+        web_evidence = {}
+        web_status = "uncertain"
+        if item.website_url:
+            try:
+                check_res = await check_website(item.website_url)
+                web_status = check_res.status
+                web_evidence = check_res.model_dump()
+            except Exception:
+                web_status = "uncertain"
+
+        # AI Qualification & draft generation based on actual public evidence
+        lead_dict = {
+            "business_name": item.business_name,
+            "industry": item.industry,
+            "state": item.state,
+            "source_url": item.source_url,
+            "instagram_url": item.instagram_url,
+            "website_url": item.website_url,
+            "website_status": web_status,
+            "evidence_json": {**web_evidence, "public_snippet": item.snippet}
+        }
+
+        try:
+            ai_out = await qualify_lead_with_ai(lead_dict, agency_profile)
+            with get_db() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    UPDATE leads SET
+                        website_status = ?,
+                        evidence_json = ?,
+                        business_summary = ?,
+                        lead_score = ?,
+                        confidence = ?,
+                        opportunity = ?,
+                        recommended_service = ?,
+                        personalized_dm = ?,
+                        reasoning_summary = ?,
+                        next_best_action = ?,
+                        outreach_status = 'draft',
+                        updated_at = ?
+                    WHERE id = ?
+                """, (
+                    web_status,
+                    json.dumps(lead_dict["evidence_json"]),
+                    ai_out.business_summary,
+                    ai_out.lead_score,
+                    ai_out.confidence,
+                    ai_out.opportunity,
+                    ai_out.recommended_service,
+                    ai_out.personalized_dm,
+                    ai_out.reasoning_summary,
+                    ai_out.next_best_action,
+                    datetime.now().isoformat(),
+                    lead_id
+                ))
+                conn.commit()
+        except Exception:
+            pass
+
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM leads WHERE id = ?", (lead_id,))
+            imported_leads.append(row_to_lead(cursor.fetchone()))
+
+    return {
+        "status": "success",
+        "imported_count": len(imported_leads),
+        "skipped_count": skipped,
+        "leads": imported_leads
+    }

@@ -1,6 +1,7 @@
 import pytest
 import sqlite3
 import json
+import asyncio
 from unittest.mock import patch, MagicMock
 from fastapi.testclient import TestClient
 
@@ -173,7 +174,7 @@ def test_inbound_webhook_auto_reply_flow(monkeypatch):
         cursor.execute("UPDATE app_settings SET value = ? WHERE key = 'business_profile'", (json.dumps(p),))
         conn.commit()
 
-    async def mock_draft_routine(incoming, history, profile):
+    async def mock_draft_routine(*args, **kwargs):
         return {
             "ai_draft": "Abenzo Starter Package starts at ₹15,000+ for 3-5 pages.",
             "reasoning": "Standard FAQ response.",
@@ -205,17 +206,24 @@ def test_inbound_webhook_auto_reply_flow(monkeypatch):
     # Verify event and conversation in DB
     with get_db() as conn:
         cursor = conn.cursor()
+        # Inbound event persisted immediately
         cursor.execute("SELECT * FROM conversation_events WHERE external_event_id = 'mid_auto_routine_001'")
-        ev = dict(cursor.fetchone())
-        assert ev["delivery_status"] == "sent"
-        assert ev["meta_message_id"] == "mid_auto_1"
-        assert ev["approved_text"] == "Abenzo Starter Package starts at ₹15,000+ for 3-5 pages."
+        in_ev = dict(cursor.fetchone())
+        assert in_ev["direction"] == "inbound"
+        assert in_ev["delivery_status"] == "received"
+
+        # Outbound event persisted after dispatch
+        cursor.execute("SELECT * FROM conversation_events WHERE conversation_id = ? AND direction = 'outbound'", (in_ev["conversation_id"],))
+        out_ev = dict(cursor.fetchone())
+        assert out_ev["delivery_status"] == "sent"
+        assert out_ev["meta_message_id"] == "mid_auto_1"
+        assert out_ev["message_text"] == "Abenzo Starter Package starts at ₹15,000+ for 3-5 pages."
 
         cursor.execute("SELECT needs_human FROM conversations WHERE external_thread_id = 'ig_user_auto_routine_1'")
         assert cursor.fetchone()["needs_human"] == 0
 
     # 3. Complex inquiry requiring human decision
-    async def mock_draft_complex(incoming, history, profile):
+    async def mock_draft_complex(*args, **kwargs):
         return {
             "ai_draft": "Hi! We'd love to learn more about your custom enterprise architecture.",
             "reasoning": "Custom quote required.",
@@ -248,8 +256,12 @@ def test_inbound_webhook_auto_reply_flow(monkeypatch):
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM conversation_events WHERE external_event_id = 'mid_auto_complex_001'")
         ev = dict(cursor.fetchone())
-        assert ev["delivery_status"] == "draft_pending"
-        assert ev["approved_text"] == ""
+        assert ev["delivery_status"] == "received"
+
+        # Outbound draft pending event
+        cursor.execute("SELECT * FROM conversation_events WHERE conversation_id = ? AND direction = 'outbound'", (ev["conversation_id"],))
+        draft_ev = dict(cursor.fetchone())
+        assert draft_ev["delivery_status"] == "draft_pending"
 
         cursor.execute("SELECT needs_human FROM conversations WHERE external_thread_id = 'ig_user_auto_complex_1'")
         assert cursor.fetchone()["needs_human"] == 1
@@ -867,7 +879,7 @@ def test_webhook_external_calls_happen_outside_db_transactions(monkeypatch):
         conn.commit()
 
     draft_called_while_db_open = None
-    async def mock_draft(incoming, history, profile):
+    async def mock_draft(*args, **kwargs):
         nonlocal draft_called_while_db_open
         draft_called_while_db_open = db_is_open
         return {
@@ -905,6 +917,464 @@ def test_webhook_external_calls_happen_outside_db_transactions(monkeypatch):
     # CRUCIAL ASSERTIONS: Neither AI draft nor Instagram dispatch may be called while DB is open!
     assert draft_called_while_db_open is False, "draft_inbound_response_with_ai was called inside get_db()!"
     assert dispatch_called_while_db_open is False, "dispatch_instagram_dm was called inside get_db()!"
+
+
+def test_two_customers_have_separate_isolated_histories(monkeypatch):
+    """
+    Verifies that every customer's Instagram conversation is strictly isolated
+    by the sender ID, and histories/contexts never leak between customers.
+    """
+    monkeypatch.setattr("backend.app.config.settings.META_ACCESS_TOKEN", "test_ig_token")
+
+    async def mock_draft(incoming_message, conversation_history, agency_profile, conversation_summary="", lead_context=None):
+        return {
+            "ai_draft": f"Consultant reply to: {incoming_message}",
+            "reasoning": "Separate context",
+            "lead_temperature": "qualified",
+            "needs_human_decision": False,
+            "conversation_summary": f"Summary for {incoming_message}",
+            "lead_context": {"requested_service": "Web Design", "business_type": incoming_message}
+        }
+
+    monkeypatch.setattr("backend.app.routers.meta.draft_inbound_response_with_ai", mock_draft)
+
+    # Customer 1 message
+    payload_1 = {
+        "entry": [{
+            "messaging": [{
+                "sender": {"id": "customer_alpha_101"},
+                "message": {"mid": "mid_cust_alpha_01", "text": "I sell handmade ceramics in Goa"}
+            }]
+        }]
+    }
+    client.post("/api/meta/webhook", json=payload_1)
+
+    # Customer 2 message
+    payload_2 = {
+        "entry": [{
+            "messaging": [{
+                "sender": {"id": "customer_beta_202"},
+                "message": {"mid": "mid_cust_beta_01", "text": "We operate a dental clinic in Kochi"}
+            }]
+        }]
+    }
+    client.post("/api/meta/webhook", json=payload_2)
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM conversations WHERE external_thread_id = 'customer_alpha_101'")
+        conv_alpha = dict(cursor.fetchone())
+        cursor.execute("SELECT * FROM conversations WHERE external_thread_id = 'customer_beta_202'")
+        conv_beta = dict(cursor.fetchone())
+
+        assert conv_alpha["id"] != conv_beta["id"]
+        assert "ceramics" in conv_alpha["conversation_summary"]
+        assert "dental" in conv_beta["conversation_summary"]
+
+        cursor.execute("SELECT * FROM conversation_events WHERE conversation_id = ?", (conv_alpha["id"],))
+        events_alpha = [dict(r) for r in cursor.fetchall()]
+        assert all("dental" not in (e["message_text"] or "") for e in events_alpha)
+
+        cursor.execute("SELECT * FROM conversation_events WHERE conversation_id = ?", (conv_beta["id"],))
+        events_beta = [dict(r) for r in cursor.fetchall()]
+        assert all("ceramics" not in (e["message_text"] or "") for e in events_beta)
+
+
+def test_history_and_lead_context_loaded_into_prompt(monkeypatch):
+    """
+    Verifies that recent conversation turns, rolling summary, and structured lead context
+    are passed to the AI prompt without data loss.
+    """
+    captured_prompt = None
+
+    async def mock_call_ai(prompt, **kwargs):
+        nonlocal captured_prompt
+        captured_prompt = prompt
+        return json.dumps({
+            "ai_draft": "Got it — an online store for ceramics. Will you need delivery across India?",
+            "reasoning": "Probing requirement",
+            "lead_temperature": "qualified",
+            "needs_human_decision": False,
+            "conversation_summary": "Handmade ceramics shop in Goa looking for website.",
+            "lead_context": {
+                "business_type": "Ceramics Shop",
+                "requested_service": "E-commerce Website",
+                "requirements": "Online ordering",
+                "budget": "Not volunteered",
+                "timeline": "Flexible",
+                "next_step": "Confirm shipping needs"
+            },
+            "suggested_conversion_stage": "qualified_lead"
+        })
+
+    monkeypatch.setattr("backend.app.services.ollama_service.call_ai_completion", mock_call_ai)
+
+    history = [
+        {"role": "user", "text": "I want to build a website for my ceramics store."},
+        {"role": "assistant", "text": "Nice! What kind of products will your shop sell?"}
+    ]
+    lead_ctx = {"business_type": "Ceramics", "requested_service": "Website"}
+
+    result = asyncio.run(draft_inbound_response_with_ai(
+        incoming_message="Handmade cups and plates.",
+        conversation_history=history,
+        agency_profile={"agency_name": "Abenzo"},
+        conversation_summary="Customer wants a ceramics store website.",
+        lead_context=lead_ctx
+    ))
+
+    assert "ceramics" in captured_prompt.lower()
+    assert "Handmade cups and plates" in captured_prompt
+    assert "Customer wants a ceramics store website" in captured_prompt
+    assert result["lead_temperature"] == "qualified"
+    assert result["lead_context"]["business_type"] == "Ceramics Shop"
+
+
+def test_sales_consultant_anti_repetition_and_short_replies(monkeypatch):
+    """
+    Verifies that messages like 'okay' or 'thanks' do not trigger an unprompted pricing dump,
+    and replies adhere to the concise consultant strategy under 45 words.
+    """
+    captured_prompt = None
+
+    async def mock_call_ai(prompt, **kwargs):
+        nonlocal captured_prompt
+        captured_prompt = prompt
+        return json.dumps({
+            "ai_draft": "No rush 😊 What features are most important for your shop?",
+            "reasoning": "Acknowledged calmly without pitching",
+            "lead_temperature": "engaged",
+            "needs_human_decision": False,
+            "conversation_summary": "Customer acknowledged, exploring features.",
+            "lead_context": {"next_step": "Explore key features"}
+        })
+
+    monkeypatch.setattr("backend.app.services.ollama_service.call_ai_completion", mock_call_ai)
+
+    result = asyncio.run(draft_inbound_response_with_ai(
+        incoming_message="Ooh okay.",
+        conversation_history=[
+            {"role": "user", "text": "I want an online clothing store."},
+            {"role": "assistant", "text": "Got it! Will you need online payments and delivery options from day one?"}
+        ],
+        agency_profile={"agency_name": "Abenzo"},
+        conversation_summary="Clothing store inquiry.",
+        lead_context={"business_type": "Clothing store"}
+    ))
+
+    # Prompt must contain the explicit rule preventing pricing dumps on simple acknowledgments
+    assert "AVOID UNPROVOKED PRICING DUMPS" in captured_prompt
+    assert "Do NOT dump the pricing list" in captured_prompt
+    # Reply must be short and conversational
+    reply_words = result["ai_draft"].split()
+    assert len(reply_words) < 45
+    assert "₹" not in result["ai_draft"]
+
+
+def test_duplicate_webhook_events_idempotency(monkeypatch):
+    """
+    Verifies that identical inbound webhook message IDs are processed once,
+    preventing duplicate database rows and duplicate replies.
+    """
+    monkeypatch.setattr("backend.app.config.settings.META_ACCESS_TOKEN", "test_ig_token")
+
+    payload = {
+        "entry": [{
+            "messaging": [{
+                "sender": {"id": "user_idempotency_test"},
+                "message": {
+                    "mid": "mid_unique_idempotency_001",
+                    "text": "Hello, do you build Next.js apps?"
+                }
+            }]
+        }]
+    }
+
+    # First delivery
+    resp1 = client.post("/api/meta/webhook", json=payload)
+    assert resp1.status_code == 200
+    assert resp1.json()["events_processed"] == 1
+
+    # Second delivery with the same message id
+    resp2 = client.post("/api/meta/webhook", json=payload)
+    assert resp2.status_code == 200
+    assert resp2.json()["events_processed"] == 0
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) as count FROM conversation_events WHERE external_event_id = 'mid_unique_idempotency_001'")
+        assert cursor.fetchone()["count"] == 1
+
+
+def test_failed_outbound_delivery_handling(monkeypatch):
+    """
+    Verifies that when the Meta Graph API fails to deliver an outbound message,
+    the failure is logged and the event record delivery_status is set to 'failed'.
+    """
+    monkeypatch.setattr("backend.app.config.settings.META_ACCESS_TOKEN", "test_ig_token")
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT value FROM app_settings WHERE key = 'business_profile'")
+        r = cursor.fetchone()
+        p = json.loads(r["value"]) if r else {}
+        p["auto_reply_faq_enabled"] = True
+        cursor.execute("UPDATE app_settings SET value = ? WHERE key = 'business_profile'", (json.dumps(p),))
+        conn.commit()
+
+    async def mock_draft(*args, **kwargs):
+        return {
+            "ai_draft": "Our starter package is ₹15,000+.",
+            "reasoning": "Standard response",
+            "lead_temperature": "qualified",
+            "needs_human_decision": False
+        }
+
+    async def mock_failed_dispatch(recipient_id, text):
+        return {
+            "success": False,
+            "error_details": "Graph API Error 100: User cannot be messaged (24h window closed)"
+        }
+
+    monkeypatch.setattr("backend.app.routers.meta.draft_inbound_response_with_ai", mock_draft)
+    monkeypatch.setattr("backend.app.routers.meta.dispatch_instagram_dm", mock_failed_dispatch)
+
+    payload = {
+        "entry": [{
+            "messaging": [{
+                "sender": {"id": "user_failed_delivery_test"},
+                "message": {
+                    "mid": "mid_delivery_fail_001",
+                    "text": "Can I get a quote?"
+                }
+            }]
+        }]
+    }
+
+    resp = client.post("/api/meta/webhook", json=payload)
+    assert resp.status_code == 200
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM conversation_events WHERE external_event_id = 'mid_delivery_fail_001'")
+        in_ev = dict(cursor.fetchone())
+        assert in_ev["delivery_status"] == "received"
+
+        cursor.execute("SELECT * FROM conversation_events WHERE conversation_id = ? AND direction = 'outbound'", (in_ev["conversation_id"],))
+        out_ev = dict(cursor.fetchone())
+        assert out_ev["delivery_status"] == "failed"
+        assert "Graph API Error" in out_ev["error_details"]
+
+
+def test_ai_provider_failure_and_db_resilience(monkeypatch):
+    """
+    Verifies that when the AI provider times out or raises an error:
+    1. The inbound event is NOT lost.
+    2. A safe fallback response is drafted.
+    3. The conversation is marked as needs_human=1 for manual review.
+    """
+    monkeypatch.setattr("backend.app.config.settings.META_ACCESS_TOKEN", "test_ig_token")
+
+    async def mock_failing_draft(*args, **kwargs):
+        raise RuntimeError("Hosted AI connection timeout")
+
+    monkeypatch.setattr("backend.app.routers.meta.draft_inbound_response_with_ai", mock_failing_draft)
+
+    payload = {
+        "entry": [{
+            "messaging": [{
+                "sender": {"id": "user_ai_failure_test"},
+                "message": {
+                    "mid": "mid_ai_fail_001",
+                    "text": "What are your website packages?"
+                }
+            }]
+        }]
+    }
+
+    resp = client.post("/api/meta/webhook", json=payload)
+    assert resp.status_code == 200
+    assert resp.json()["events_processed"] == 1
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM conversation_events WHERE external_event_id = 'mid_ai_fail_001'")
+        in_ev = dict(cursor.fetchone())
+        assert in_ev["delivery_status"] == "received"
+
+        cursor.execute("SELECT * FROM conversation_events WHERE conversation_id = ? AND direction = 'outbound'", (in_ev["conversation_id"],))
+        out_ev = dict(cursor.fetchone())
+        assert out_ev["delivery_status"] == "draft_pending"
+        assert "follow up shortly" in out_ev["ai_draft"]
+
+        cursor.execute("SELECT needs_human FROM conversations WHERE id = ?", (in_ev["conversation_id"],))
+        assert cursor.fetchone()["needs_human"] == 1
+
+
+def test_lead_discovery_and_duplicate_detection(monkeypatch):
+    """
+    Verifies the live lead discovery endpoint:
+    - Finds prospects with score reasons and website reachability.
+    - Accurately flags existing CRM domains as duplicates.
+    - Successfully imports non-duplicate prospects into CRM.
+    """
+    # 1. Insert an existing lead to test deduplication
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO leads (business_name, website_url, created_at, updated_at)
+            VALUES ('Existing Dental Clinic', 'https://existingdental.com', datetime('now'), datetime('now'))
+        """)
+        conn.commit()
+
+    # 2. Mock external search provider
+    from backend.app.services.discovery_service import PublicDirectorySearchProvider
+
+    async def mock_search(self, query, state="", industry="", limit=10):
+        return [
+            {
+                "business_name": "Existing Dental Clinic",
+                "website_url": "https://existingdental.com",
+                "instagram_url": "",
+                "contact_details": "+91 98460 00000",
+                "source_url": "https://directory.in/dental",
+                "industry": "Healthcare",
+                "state": "Kerala",
+                "snippet": "Best dental care clinic in Kochi."
+            },
+            {
+                "business_name": "Sunrise Architectural Studio",
+                "website_url": "https://sunrisearchitects.in",
+                "instagram_url": "",
+                "contact_details": "+91 98470 11111",
+                "source_url": "https://directory.in/architects",
+                "industry": "Architecture",
+                "state": "Kerala",
+                "snippet": "Contemporary interior and architectural designs."
+            }
+        ]
+
+    monkeypatch.setattr(PublicDirectorySearchProvider, "search", mock_search)
+
+    # 3. Call discovery endpoint
+    disc_resp = client.post("/api/leads/discover", json={
+        "niche": "Architecture",
+        "location": "Kerala",
+        "keywords": "design",
+        "limit": 5
+    })
+    assert disc_resp.status_code == 200
+    data = disc_resp.json()
+    assert data["status"] == "success"
+    assert len(data["results"]) == 2
+
+    # Check deduplication
+    res_dental = next(r for r in data["results"] if r["domain"] == "existingdental.com")
+    assert res_dental["is_duplicate"] is True
+
+    res_arch = next(r for r in data["results"] if r["domain"] == "sunrisearchitects.in")
+    assert res_arch["is_duplicate"] is False
+    assert res_arch["lead_score"] > 0
+    assert len(res_arch["score_reasons"]) > 0
+
+    # 4. Import the new lead
+    import_resp = client.post("/api/leads/import-discovered", json={
+        "items": [res_arch]
+    })
+    assert import_resp.status_code == 200
+    import_data = import_resp.json()
+    assert import_data["imported_count"] == 1
+    assert import_data["skipped_count"] == 0
+
+    # Verify present in leads CRM
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM leads WHERE website_url = 'https://sunrisearchitects.in'")
+        imported_lead = cursor.fetchone()
+        assert imported_lead is not None
+        assert imported_lead["business_name"] == "Sunrise Architectural Studio"
+
+
+def test_human_takeover_prevents_automatic_replies(monkeypatch):
+    """
+    Verifies that when a conversation has auto_reply_paused=1 (Human Takeover Active):
+    1. Inbound messages are recorded.
+    2. Automatic outbound dispatch is blocked, even if auto_reply_faq_enabled=True.
+    3. The message is queued as draft_pending.
+    4. The human takeover flag can be toggled via PATCH /api/inbox/conversations/{id}.
+    """
+    monkeypatch.setattr("backend.app.config.settings.META_ACCESS_TOKEN", "test_ig_token")
+
+    # 1. Enable global auto reply
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT value FROM app_settings WHERE key = 'business_profile'")
+        r = cursor.fetchone()
+        p = json.loads(r["value"]) if r else {}
+        p["auto_reply_faq_enabled"] = True
+        cursor.execute("UPDATE app_settings SET value = ? WHERE key = 'business_profile'", (json.dumps(p),))
+        conn.commit()
+
+    # 2. Create conversation with auto_reply_paused=1
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO conversations (platform, external_thread_id, contact_display_name, auto_reply_paused, created_at, updated_at)
+            VALUES ('instagram', 'ig_user_human_takeover_test', 'VIP Client', 1, datetime('now'), datetime('now'))
+        """)
+        conn.commit()
+        cursor.execute("SELECT id FROM conversations WHERE external_thread_id = 'ig_user_human_takeover_test'")
+        conv_id = cursor.fetchone()["id"]
+
+    dispatched = []
+    async def mock_dispatch(recipient_id, text):
+        dispatched.append(text)
+        return {"success": True, "meta_message_id": "mid_blocked_test"}
+
+    async def mock_draft(*args, **kwargs):
+        return {
+            "ai_draft": "Automated response that should be held as draft",
+            "reasoning": "Standard answer",
+            "lead_temperature": "qualified",
+            "needs_human_decision": False
+        }
+
+    monkeypatch.setattr("backend.app.routers.meta.dispatch_instagram_dm", mock_dispatch)
+    monkeypatch.setattr("backend.app.routers.meta.draft_inbound_response_with_ai", mock_draft)
+
+    # Inbound message arrives
+    payload = {
+        "entry": [{
+            "messaging": [{
+                "sender": {"id": "ig_user_human_takeover_test"},
+                "message": {
+                    "mid": "mid_takeover_001",
+                    "text": "What is the cost of website maintenance?"
+                }
+            }]
+        }]
+    }
+    resp = client.post("/api/meta/webhook", json=payload)
+    assert resp.status_code == 200
+
+    # Automated dispatch MUST NOT be called because human takeover is active
+    assert len(dispatched) == 0
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM conversation_events WHERE conversation_id = ? AND direction = 'outbound'", (conv_id,))
+        out_ev = dict(cursor.fetchone())
+        assert out_ev["delivery_status"] == "draft_pending"
+
+    # Test toggling takeover back to automatic via PATCH
+    patch_resp = client.patch(f"/api/inbox/conversations/{conv_id}", json={
+        "auto_reply_paused": 0,
+        "conversion_stage": "consultation_requested"
+    })
+    assert patch_resp.status_code == 200
+    assert patch_resp.json()["auto_reply_paused"] == 0
+    assert patch_resp.json()["conversion_stage"] == "consultation_requested"
+
 
 
 

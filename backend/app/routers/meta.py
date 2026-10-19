@@ -268,10 +268,13 @@ async def receive_meta_webhook(
         if not mid or not text or not sender_id or sender_id in own_ids:
             continue
 
-        # Step 3a: Read/Prepare Conversation (Short DB Transaction)
+        # Step 3a: Read/Prepare Conversation & Persist Inbound Event (Short DB Transaction)
         conv_id = None
         conv_history = []
         is_duplicate = False
+        conversation_summary = ""
+        lead_context = {}
+        auto_reply_paused = False
 
         try:
             with get_db() as conn:
@@ -280,11 +283,17 @@ async def receive_meta_webhook(
                 if cursor.fetchone():
                     is_duplicate = True
                 else:
-                    # Find or create conversation
-                    cursor.execute("SELECT id FROM conversations WHERE external_thread_id = ?", (sender_id,))
+                    # Find or create conversation isolated by sender_id
+                    cursor.execute("SELECT * FROM conversations WHERE external_thread_id = ?", (sender_id,))
                     conv = cursor.fetchone()
                     if conv:
                         conv_id = conv["id"]
+                        conversation_summary = conv["conversation_summary"] or ""
+                        try:
+                            lead_context = json.loads(conv["lead_context_json"] or "{}")
+                        except Exception:
+                            lead_context = {}
+                        auto_reply_paused = bool(conv["auto_reply_paused"])
                         cursor.execute("""
                             UPDATE conversations SET
                                 last_message_at = ?,
@@ -296,50 +305,74 @@ async def receive_meta_webhook(
                         cursor.execute("""
                             INSERT INTO conversations (
                                 platform, external_thread_id, recipient_id, contact_display_name,
-                                status, needs_human, lead_temperature, notes, created_at, updated_at
-                            ) VALUES ('instagram', ?, ?, ?, 'active', 1, 'early', 'Inbound Instagram DM via Official Webhook', ?, ?)
+                                status, needs_human, lead_temperature, notes, conversation_summary,
+                                lead_context_json, conversion_stage, auto_reply_paused, created_at, updated_at
+                            ) VALUES ('instagram', ?, ?, ?, 'active', 1, 'early', 'Inbound Instagram DM via Official Webhook', '', '{}', 'lead', 0, ?, ?)
                         """, (sender_id, sender_id, f"IG User ({sender_id[:8]})", now, now))
                         conv_id = cursor.lastrowid
 
-                    # Fetch recent conversation context (last 4 events)
+                    # Fetch recent chronological conversation context (isolated to this conversation)
                     cursor.execute("""
                         SELECT direction, message_text, approved_text, ai_draft
                         FROM conversation_events
                         WHERE conversation_id = ?
-                        ORDER BY id DESC LIMIT 4
+                        ORDER BY id ASC LIMIT 8
                     """, (conv_id,))
                     recent_rows = cursor.fetchall()
-                    for r in reversed(recent_rows):
+                    for r in recent_rows:
                         if r["direction"] == "inbound":
                             conv_history.append({"role": "user", "content": r["message_text"]})
                         else:
-                            c = r["approved_text"] or r["ai_draft"]
+                            c = r["approved_text"] or r["ai_draft"] or r["message_text"]
                             if c:
                                 conv_history.append({"role": "assistant", "content": c})
+
+                    # Persist inbound message immediately so it is never lost even if AI or dispatch fails
+                    cursor.execute("""
+                        INSERT INTO conversation_events (
+                            conversation_id, external_event_id, event_type, direction,
+                            message_text, ai_draft, approved_text, delivery_status, created_at
+                        ) VALUES (?, ?, 'dm', 'inbound', ?, '', '', 'received', ?)
+                    """, (conv_id, mid, text, now))
+                    conn.commit()
         except Exception as e:
-            logger.error("Database error during conversation lookup for mid %s: %s", mid, type(e).__name__)
+            logger.error("Database error during conversation lookup/inbound event save for mid %s: %s", mid, type(e).__name__)
             continue
 
         if is_duplicate or not conv_id:
             continue
 
-        # Step 3b: Slow AI Draft Generation (OUTSIDE Database Transaction)
+        # Step 3b: AI Draft & Memory Extraction (OUTSIDE Database Transaction)
         ai_draft = ""
         lead_temp = "early"
         needs_human = True
+        updated_summary = conversation_summary
+        updated_lead_context = lead_context
+        suggested_stage = "lead"
+
         try:
-            draft_res = await draft_inbound_response_with_ai(text, conv_history, agency_profile)
+            draft_res = await draft_inbound_response_with_ai(
+                incoming_message=text,
+                conversation_history=conv_history,
+                agency_profile=agency_profile,
+                conversation_summary=conversation_summary,
+                lead_context=lead_context
+            )
             ai_draft = (draft_res.get("ai_draft") or "").strip()
             lead_temp = draft_res.get("lead_temperature", "early")
             needs_human = bool(draft_res.get("needs_human_decision", True))
+            updated_summary = draft_res.get("conversation_summary") or conversation_summary
+            updated_lead_context = draft_res.get("lead_context") or lead_context
+            suggested_stage = draft_res.get("suggested_conversion_stage") or "lead"
         except Exception as e:
             logger.warning("AI draft failed for mid %s: %s", mid, type(e).__name__)
-            ai_draft = "Hi! Thank you for reaching out to Abenzo. A team member will follow up shortly."
+            ai_draft = "Thanks for reaching out to Abenzo! A team member will follow up shortly."
             needs_human = True
 
         # Determine if eligible for automated outbound dispatch
         is_auto_reply_eligible = (
             auto_reply_enabled and
+            not auto_reply_paused and
             bool(ai_draft) and
             not needs_human and
             bool(settings.effective_instagram_token) and
@@ -357,72 +390,81 @@ async def receive_meta_webhook(
                 logger.error("Outbound dispatch failed for mid %s: %s", mid, type(e).__name__)
                 dispatch_res = {"success": False, "error_details": f"Dispatch error: {type(e).__name__}"}
 
-        # Step 3d: Write Conversation Event & Update Status (Short DB Transaction)
+        # Step 3d: Persist Outbound Event & Update Conversation Memory (Short DB Transaction)
         try:
             with get_db() as conn:
                 cursor = conn.cursor()
-                # Re-check deduplication before write
-                cursor.execute("SELECT id FROM conversation_events WHERE external_event_id = ?", (mid,))
-                if cursor.fetchone():
-                    continue
 
                 if is_auto_reply_eligible and dispatch_res:
                     if dispatch_res.get("success"):
                         meta_mid = dispatch_res.get("meta_message_id", "")
+                        out_mid = f"out_{meta_mid or uuid.uuid4().hex[:12]}"
                         cursor.execute("""
                             INSERT INTO conversation_events (
                                 conversation_id, external_event_id, event_type, direction,
                                 message_text, ai_draft, approved_text, delivery_status,
                                 meta_message_id, sent_at, created_at
-                            ) VALUES (?, ?, 'dm', 'inbound', ?, ?, ?, 'sent', ?, ?, ?)
-                        """, (conv_id, mid, text, ai_draft, ai_draft, meta_mid, now, now))
+                            ) VALUES (?, ?, 'dm', 'outbound', ?, ?, ?, 'sent', ?, ?, ?)
+                        """, (conv_id, out_mid, ai_draft, ai_draft, ai_draft, meta_mid, now, now))
 
                         cursor.execute("""
                             UPDATE conversations SET
                                 needs_human = 0,
                                 lead_temperature = ?,
+                                conversation_summary = ?,
+                                lead_context_json = ?,
+                                conversion_stage = ?,
                                 last_message_at = ?,
                                 updated_at = ?
                             WHERE id = ?
-                        """, (lead_temp, now, now, conv_id))
+                        """, (lead_temp, updated_summary, json.dumps(updated_lead_context), suggested_stage, now, now, conv_id))
                     else:
                         err = dispatch_res.get("error_details", "")
+                        out_mid = f"out_fail_{uuid.uuid4().hex[:10]}"
                         cursor.execute("""
                             INSERT INTO conversation_events (
                                 conversation_id, external_event_id, event_type, direction,
                                 message_text, ai_draft, approved_text, delivery_status,
                                 error_details, created_at
-                            ) VALUES (?, ?, 'dm', 'inbound', ?, ?, ?, 'failed', ?, ?)
-                        """, (conv_id, mid, text, ai_draft, ai_draft, err, now))
+                            ) VALUES (?, ?, 'dm', 'outbound', ?, ?, ?, 'failed', ?, ?)
+                        """, (conv_id, out_mid, ai_draft, ai_draft, ai_draft, err, now))
 
                         cursor.execute("""
                             UPDATE conversations SET
                                 needs_human = 1,
                                 lead_temperature = ?,
+                                conversation_summary = ?,
+                                lead_context_json = ?,
+                                conversion_stage = ?,
                                 last_message_at = ?,
                                 updated_at = ?
                             WHERE id = ?
-                        """, (lead_temp, now, now, conv_id))
+                        """, (lead_temp, updated_summary, json.dumps(updated_lead_context), suggested_stage, now, now, conv_id))
                 else:
+                    out_mid = f"out_draft_{uuid.uuid4().hex[:10]}"
                     cursor.execute("""
                         INSERT INTO conversation_events (
                             conversation_id, external_event_id, event_type, direction,
                             message_text, ai_draft, approved_text, delivery_status, created_at
-                        ) VALUES (?, ?, 'dm', 'inbound', ?, ?, '', 'draft_pending', ?)
-                    """, (conv_id, mid, text, ai_draft, now))
+                        ) VALUES (?, ?, 'dm', 'outbound', ?, ?, '', 'draft_pending', ?)
+                    """, (conv_id, out_mid, ai_draft, ai_draft, now))
 
                     cursor.execute("""
                         UPDATE conversations SET
                             needs_human = 1,
                             lead_temperature = ?,
+                            conversation_summary = ?,
+                            lead_context_json = ?,
+                            conversion_stage = ?,
                             last_message_at = ?,
                             updated_at = ?
                         WHERE id = ?
-                    """, (lead_temp, now, now, conv_id))
+                    """, (lead_temp, updated_summary, json.dumps(updated_lead_context), suggested_stage, now, now, conv_id))
 
                 processed_count += 1
+                conn.commit()
         except Exception as e:
-            logger.error("Database error saving event record for mid %s: %s", mid, type(e).__name__)
+            logger.error("Database error saving outbound event record for mid %s: %s", mid, type(e).__name__)
 
     return {"status": "ok", "events_processed": processed_count}
 

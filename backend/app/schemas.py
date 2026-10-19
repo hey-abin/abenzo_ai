@@ -110,9 +110,20 @@ class ConversationResponse(BaseModel):
     needs_human: int
     lead_temperature: str
     notes: str
+    conversation_summary: Optional[str] = ""
+    lead_context: Optional[Dict[str, Any]] = {}
+    conversion_stage: Optional[str] = "lead"
+    auto_reply_paused: Optional[int] = 0
     created_at: str
     updated_at: str
     events: List[ConversationEventResponse] = []
+
+class ConversationUpdate(BaseModel):
+    needs_human: Optional[int] = None
+    lead_temperature: Optional[str] = None
+    conversion_stage: Optional[str] = None
+    auto_reply_paused: Optional[int] = None
+    notes: Optional[str] = None
 
 class SendReplyRequest(BaseModel):
     event_id: int
@@ -129,6 +140,41 @@ class SendReplyResponse(BaseModel):
     recipient_id: str
     sent_at: Optional[str] = ""
     error_details: Optional[str] = ""
+
+class LeadDiscoveryQuery(BaseModel):
+    niche: Optional[str] = ""
+    city_or_state: Optional[str] = ""
+    keywords: Optional[str] = ""
+    limit: Optional[int] = 10
+
+class LeadDiscoveryItem(BaseModel):
+    business_name: str
+    website_url: Optional[str] = ""
+    domain: Optional[str] = ""
+    instagram_url: Optional[str] = ""
+    contact_details: Optional[str] = ""
+    source_url: str = ""
+    industry: Optional[str] = ""
+    state: Optional[str] = ""
+    snippet: Optional[str] = ""
+    already_exists: bool = False
+    is_duplicate: bool = False
+    existing_lead_id: Optional[int] = None
+    lead_score: int = 50
+    score_reasons: List[str] = []
+    reachable: bool = True
+    status_code: Optional[int] = 200
+
+class LeadDiscoveryResponse(BaseModel):
+    status: str
+    query: str
+    provider: str
+    results: List[LeadDiscoveryItem] = []
+    total_found: int = 0
+    error_message: Optional[str] = None
+
+class ImportDiscoveredRequest(BaseModel):
+    items: List[LeadDiscoveryItem]
 
 class BusinessProfile(BaseModel):
     agency_name: str = "Abenzo"

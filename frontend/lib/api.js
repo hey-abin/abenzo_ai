@@ -221,3 +221,39 @@ export async function createKnowledgeItem(data) {
   if (!res.ok) throw new Error("Failed to create knowledge item");
   return res.json();
 }
+
+export async function discoverLeads(params) {
+  const res = await fetch(`${API_BASE}/leads/discover`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(params),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: "Lead discovery failed" }));
+    throw new Error(err.detail || "Lead discovery failed");
+  }
+  return res.json();
+}
+
+export async function importDiscoveredLeads(items) {
+  const res = await fetch(`${API_BASE}/leads/import-discovered`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ items }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: "Importing discovered leads failed" }));
+    throw new Error(err.detail || "Importing discovered leads failed");
+  }
+  return res.json();
+}
+
+export async function updateConversation(id, data) {
+  const res = await fetch(`${API_BASE}/inbox/conversations/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) throw new Error("Failed to update conversation");
+  return res.json();
+}

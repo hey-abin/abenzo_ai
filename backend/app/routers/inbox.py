@@ -8,6 +8,7 @@ from backend.app.schemas import (
     ConversationResponse,
     ConversationEventResponse,
     ConversationEventCreate,
+    ConversationUpdate,
     SendReplyRequest,
     SendReplyResponse,
     ConversationReplyRequest
@@ -42,6 +43,10 @@ def get_conversations(needs_human: Optional[int] = None, status: Optional[str] =
             """, (c_dict["id"],))
             events = [dict(e) for e in cursor.fetchall()]
             c_dict["events"] = events
+            try:
+                c_dict["lead_context"] = json.loads(c_dict.get("lead_context_json") or "{}")
+            except Exception:
+                c_dict["lead_context"] = {}
             conversations.append(c_dict)
 
         return conversations
@@ -61,6 +66,47 @@ def get_conversation(conv_id: int):
             ORDER BY created_at ASC, id ASC
         """, (conv_id,))
         c_dict["events"] = [dict(e) for e in cursor.fetchall()]
+        try:
+            c_dict["lead_context"] = json.loads(c_dict.get("lead_context_json") or "{}")
+        except Exception:
+            c_dict["lead_context"] = {}
+        return c_dict
+
+@router.patch("/conversations/{conv_id}", response_model=ConversationResponse)
+def update_conversation(conv_id: int, update_data: ConversationUpdate):
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM conversations WHERE id = ?", (conv_id,))
+        conv = cursor.fetchone()
+        if not conv:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+
+        updates = []
+        params = []
+        data = update_data.model_dump(exclude_unset=True)
+        for k, v in data.items():
+            updates.append(f"{k} = ?")
+            params.append(v)
+
+        if updates:
+            updates.append("updated_at = ?")
+            params.append(datetime.now().isoformat())
+            params.append(conv_id)
+            cursor.execute(f"UPDATE conversations SET {', '.join(updates)} WHERE id = ?", params)
+            conn.commit()
+
+        cursor.execute("SELECT * FROM conversations WHERE id = ?", (conv_id,))
+        c_dict = dict(cursor.fetchone())
+        cursor.execute("""
+            SELECT * FROM conversation_events
+            WHERE conversation_id = ?
+            ORDER BY created_at ASC, id ASC
+        """, (conv_id,))
+        c_dict["events"] = [dict(e) for e in cursor.fetchall()]
+        try:
+            c_dict["lead_context"] = json.loads(c_dict.get("lead_context_json") or "{}")
+        except Exception:
+            c_dict["lead_context"] = {}
         return c_dict
 
 @router.post("/events/create", response_model=ConversationEventResponse)
