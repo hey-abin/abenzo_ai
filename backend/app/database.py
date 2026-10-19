@@ -267,8 +267,10 @@ def init_db(db_path: str = None):
             business_name TEXT NOT NULL,
             industry TEXT DEFAULT '',
             state TEXT DEFAULT '',
+            city TEXT DEFAULT '',
             source_url TEXT DEFAULT '',
             instagram_url TEXT DEFAULT '',
+            instagram_handle TEXT DEFAULT '',
             website_url TEXT DEFAULT '',
             website_status TEXT DEFAULT 'uncertain',
             evidence_json TEXT DEFAULT '{json.dumps({})}',
@@ -277,9 +279,21 @@ def init_db(db_path: str = None):
             confidence TEXT DEFAULT 'uncertain',
             opportunity TEXT DEFAULT '',
             recommended_service TEXT DEFAULT '',
+            suggested_service TEXT DEFAULT '',
+            observed_problems TEXT DEFAULT '',
+            score_breakdown_json TEXT DEFAULT '{{}}',
             personalized_dm TEXT DEFAULT '',
             reasoning_summary TEXT DEFAULT '',
             next_best_action TEXT DEFAULT '',
+            contact_name TEXT DEFAULT '',
+            public_phone TEXT DEFAULT '',
+            public_email TEXT DEFAULT '',
+            project_timeline TEXT DEFAULT '',
+            budget TEXT DEFAULT '',
+            consent_source TEXT DEFAULT '',
+            follow_up_date TEXT DEFAULT '',
+            outreach_action_at TEXT DEFAULT '',
+            conversation_id INTEGER DEFAULT NULL,
             outreach_status TEXT DEFAULT 'new',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
@@ -360,6 +374,27 @@ def init_db(db_path: str = None):
         # Backward-compatible migrations
         if using_pg:
             # Query existing columns first to avoid unnecessary ALTER TABLE and ACCESS EXCLUSIVE locks
+            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'leads'")
+            lead_cols = {row[0] for row in cursor.fetchall()}
+            for col, col_def in (
+                ("city", "TEXT DEFAULT ''"),
+                ("instagram_handle", "TEXT DEFAULT ''"),
+                ("suggested_service", "TEXT DEFAULT ''"),
+                ("observed_problems", "TEXT DEFAULT ''"),
+                ("score_breakdown_json", "TEXT DEFAULT '{}'"),
+                ("contact_name", "TEXT DEFAULT ''"),
+                ("public_phone", "TEXT DEFAULT ''"),
+                ("public_email", "TEXT DEFAULT ''"),
+                ("project_timeline", "TEXT DEFAULT ''"),
+                ("budget", "TEXT DEFAULT ''"),
+                ("consent_source", "TEXT DEFAULT ''"),
+                ("follow_up_date", "TEXT DEFAULT ''"),
+                ("outreach_action_at", "TEXT DEFAULT ''"),
+                ("conversation_id", "INTEGER DEFAULT NULL"),
+            ):
+                if col not in lead_cols:
+                    cursor.execute(f"ALTER TABLE leads ADD COLUMN {col} {col_def}")
+
             cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'conversations'")
             conv_cols = {row[0] for row in cursor.fetchall()}
             for col, col_def in (
@@ -393,6 +428,27 @@ def init_db(db_path: str = None):
             logger.info("[init_db] PostgreSQL migrations and sequences synchronized.")
         else:
             # SQLite uses PRAGMA table_info for migration detection
+            cursor.execute("PRAGMA table_info(leads)")
+            lead_cols = [row[1] for row in cursor.fetchall()]
+            for col, col_def in (
+                ("city", "TEXT DEFAULT ''"),
+                ("instagram_handle", "TEXT DEFAULT ''"),
+                ("suggested_service", "TEXT DEFAULT ''"),
+                ("observed_problems", "TEXT DEFAULT ''"),
+                ("score_breakdown_json", "TEXT DEFAULT '{}'"),
+                ("contact_name", "TEXT DEFAULT ''"),
+                ("public_phone", "TEXT DEFAULT ''"),
+                ("public_email", "TEXT DEFAULT ''"),
+                ("project_timeline", "TEXT DEFAULT ''"),
+                ("budget", "TEXT DEFAULT ''"),
+                ("consent_source", "TEXT DEFAULT ''"),
+                ("follow_up_date", "TEXT DEFAULT ''"),
+                ("outreach_action_at", "TEXT DEFAULT ''"),
+                ("conversation_id", "INTEGER DEFAULT NULL"),
+            ):
+                if col not in lead_cols:
+                    cursor.execute(f"ALTER TABLE leads ADD COLUMN {col} {col_def}")
+
             cursor.execute("PRAGMA table_info(conversations)")
             conv_cols = [row[1] for row in cursor.fetchall()]
             for col, col_def in (

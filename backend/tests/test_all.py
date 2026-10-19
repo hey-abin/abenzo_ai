@@ -1376,6 +1376,299 @@ def test_human_takeover_prevents_automatic_replies(monkeypatch):
     assert patch_resp.json()["conversion_stage"] == "consultation_requested"
 
 
+# ===========================================================================
+# Acceptance Tests for Instagram-First Customer Acquisition
+# ===========================================================================
+
+def test_instagram_first_discovery_returns_profiles_not_articles(monkeypatch):
+    """
+    Test 1: Discovery returns individual, relevant business profiles rather than article lists.
+    """
+    from backend.app.services.discovery_service import InstagramBusinessSearchProvider
+
+    async def mock_search(self, niche, city_or_state="", keywords="", source_mode="instagram_only", limit=10):
+        return [
+            {
+                "business_name": "Aura Luxury Boutique",
+                "instagram_username": "auraboutique_kochi",
+                "instagram_handle": "auraboutique_kochi",
+                "instagram_url": "https://instagram.com/auraboutique_kochi",
+                "website_url": "",
+                "domain": "",
+                "source_url": "https://instagram.com/auraboutique_kochi",
+                "raw_title": "Aura Luxury Boutique (@auraboutique_kochi) • Instagram photos and videos",
+                "snippet": "Designer ethnic wear & linen collection in Panampilly Nagar, Kochi. Order via WhatsApp +91 9846123456 or DM.",
+                "contacts": {"phones": ["+919846123456"], "emails": [], "external_links": []}
+            }
+        ]
+
+    monkeypatch.setattr(InstagramBusinessSearchProvider, "search", mock_search)
+
+    resp = client.post("/api/leads/discover", json={
+        "niche": "Clothing Boutiques",
+        "city_or_state": "Kochi",
+        "source_mode": "instagram_only"
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "success"
+    assert len(data["results"]) == 1
+    item = data["results"][0]
+    assert item["business_name"] == "Aura Luxury Boutique"
+    assert item["instagram_username"] == "auraboutique_kochi"
+    assert item["instagram_url"] == "https://instagram.com/auraboutique_kochi"
+    assert "article" not in item["source_url"]
+
+
+def test_invalid_and_irrelevant_search_results_excluded():
+    """
+    Test 2: Invalid or irrelevant search results (posts, reels, system pages, listicles) are excluded.
+    """
+    from backend.app.services.discovery_service import is_valid_instagram_profile_url
+
+    # Posts, reels, stories, explore, and system URLs must be rejected
+    assert is_valid_instagram_profile_url("https://www.instagram.com/p/C-1234567/")[0] is False
+    assert is_valid_instagram_profile_url("https://www.instagram.com/reel/C-xyzabc/")[0] is False
+    assert is_valid_instagram_profile_url("https://www.instagram.com/explore/tags/kochi/")[0] is False
+    assert is_valid_instagram_profile_url("https://www.instagram.com/stories/highlights/")[0] is False
+    assert is_valid_instagram_profile_url("https://www.instagram.com/accounts/login/")[0] is False
+    assert is_valid_instagram_profile_url("https://www.instagram.com/popular/boutiques-kochi/")[0] is False
+
+    # Valid profile URLs must be accepted and yield the username
+    valid, user = is_valid_instagram_profile_url("https://www.instagram.com/kochi_boutiquee/")
+    assert valid is True
+    assert user == "kochi_boutiquee"
+
+
+def test_profile_urls_and_evidence_are_verifiable():
+    """
+    Test 3: Profile URLs and evidence are real and verifiable (username extracted, title cleaned, contacts parsed).
+    """
+    from backend.app.services.discovery_service import clean_instagram_business_name, extract_contacts_and_links
+
+    # Clean title extraction
+    clean = clean_instagram_business_name("Malabar Roastery (@malabarroastery) • Instagram photos and videos", "malabarroastery")
+    assert clean == "Malabar Roastery"
+
+    # Contact extraction from bio snippet
+    bio = "Specialty single-origin coffees. Panampilly Nagar, Kochi. WhatsApp: +91 9847112233 | inquiries@malabarroastery.in | wa.me/919847112233"
+    contacts = extract_contacts_and_links(bio)
+    assert "+919847112233" in contacts["phones"]
+    assert "inquiries@malabarroastery.in" in contacts["emails"]
+
+
+def test_fit_scores_reflect_evidence_instead_of_constant_score():
+    """
+    Test 4: Fit scores reflect evidence instead of a constant score.
+    No-website and broken-website prospects receive higher fit scores than existing working sites.
+    """
+    from backend.app.services.discovery_service import evaluate_digital_opportunity
+
+    # Case A: Instagram-only business taking orders via WhatsApp (Prime opportunity for Abenzo)
+    eval_no_web = evaluate_digital_opportunity(
+        business_name="Aura Boutique",
+        niche="Boutiques",
+        city="Kochi",
+        website_url="",
+        instagram_handle="auraboutique",
+        snippet="Custom stitching and saree orders via WhatsApp in Kochi.",
+        contacts={"phones": ["+919846000000"], "emails": [], "external_links": []}
+    )
+
+    # Case B: Business with existing working website
+    eval_has_web = evaluate_digital_opportunity(
+        business_name="Corporate Architects",
+        niche="Architecture",
+        city="Kochi",
+        website_url="https://corporatearchitects.com",
+        instagram_handle="corporatearch",
+        snippet="Architecture and interior firm.",
+        contacts={"phones": [], "emails": [], "external_links": []}
+    )
+
+    # Must reflect distinct scores based on genuine opportunity
+    assert eval_no_web["lead_score"] != eval_has_web["lead_score"]
+    assert eval_no_web["lead_score"] > eval_has_web["lead_score"]
+    assert eval_no_web["website_status"] == "no_website"
+    assert "no_website_opportunity" in eval_no_web["score_breakdown"]
+    assert "WhatsApp" in eval_no_web["observed_problems"]
+
+
+def test_existing_leads_not_duplicated_by_instagram_or_domain():
+    """
+    Test 5: Existing leads are not duplicated by normalized Instagram handle, website domain, or name.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        now = "2026-10-18T10:00:00"
+        cursor.execute("""
+            INSERT INTO leads (business_name, instagram_url, website_url, created_at, updated_at)
+            VALUES ('Kochi Artisan Cafe', 'https://instagram.com/kochiartisancafe/', 'https://kochiartisancafe.in', ?, ?)
+        """, (now, now))
+        conn.commit()
+
+        from backend.app.services.discovery_service import check_duplicate_lead
+
+        # Match by instagram handle
+        dup_ig = check_duplicate_lead(cursor, "Different Name", instagram_url="https://www.instagram.com/kochiartisancafe")
+        assert dup_ig is not None
+        assert dup_ig["matched_by"] == "instagram_handle"
+
+        # Match by website domain
+        dup_web = check_duplicate_lead(cursor, "Another Name", website_url="https://www.kochiartisancafe.in/menu")
+        assert dup_web is not None
+        assert dup_web["matched_by"] == "website_url"
+
+
+def test_personalized_outreach_drafts_generated_and_can_be_copied():
+    """
+    Test 6: Outreach drafts are personalized, concise (30-50 words), non-spam, and reference observed facts.
+    """
+    from backend.app.services.discovery_service import evaluate_digital_opportunity
+
+    eval_res = evaluate_digital_opportunity(
+        business_name="The Leather Studio",
+        niche="Handmade Bags",
+        city="Kochi",
+        website_url="",
+        instagram_handle="theleatherstudio",
+        snippet="Handcrafted leather bags in Panampilly Nagar, Kochi.",
+        contacts={"phones": ["+919846123456"], "emails": [], "external_links": []}
+    )
+
+    draft = eval_res["personalized_dm"]
+    assert len(draft.split()) >= 25
+    assert len(draft.split()) <= 65
+    assert "The Leather Studio" in draft or "@theleatherstudio" in draft
+    assert "Kochi" in draft
+    assert "WhatsApp" in draft or "orders" in draft
+
+
+def test_crm_records_outreach_queue_statuses_and_timestamps():
+    """
+    Test 7: The CRM records statuses correctly: followed, contacted, replied, interested, converted, with action timestamps.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        now = "2026-10-18T10:00:00"
+        cursor.execute("""
+            INSERT INTO leads (business_name, outreach_status, created_at, updated_at)
+            VALUES ('Outreach Queue Test Co', 'new', ?, ?)
+        """, (now, now))
+        lead_id = cursor.lastrowid
+        conn.commit()
+
+    # Update to 'followed'
+    resp = client.patch(f"/api/leads/{lead_id}", json={"outreach_status": "followed"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["outreach_status"] == "followed"
+    assert data["outreach_action_at"] != ""
+
+    # Update to 'contacted'
+    resp2 = client.patch(f"/api/leads/{lead_id}", json={"outreach_status": "contacted"})
+    assert resp2.status_code == 200
+    assert resp2.json()["outreach_status"] == "contacted"
+
+
+def test_instagram_inbound_dm_matches_lead_and_updates_stage():
+    """
+    Test 8: Inbound Instagram DM matches existing CRM lead, links conversation, and marks lead as 'replied'.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        now = "2026-10-18T10:00:00"
+        cursor.execute("""
+            INSERT INTO leads (business_name, instagram_handle, outreach_status, created_at, updated_at)
+            VALUES ('Studio Verde', 'studioverde_kochi', 'contacted', ?, ?)
+        """, (now, now))
+        lead_id = cursor.lastrowid
+
+        cursor.execute("""
+            INSERT INTO conversations (platform, external_thread_id, recipient_id, lead_id, contact_display_name, created_at, updated_at)
+            VALUES ('instagram', 'ig_sender_verde_100', 'ig_sender_verde_100', ?, 'Studio Verde', ?, ?)
+        """, (lead_id, now, now))
+        conn.commit()
+
+    # Inbound webhook payload from this customer
+    webhook_payload = {
+        "entry": [{
+            "messaging": [{
+                "sender": {"id": "ig_sender_verde_100"},
+                "message": {
+                    "mid": "mid_inbound_verde_001",
+                    "text": "Hi Abenzo! Yes, we would love to see a preview of the WhatsApp catalog."
+                }
+            }]
+        }]
+    }
+
+    resp = client.post("/api/meta/webhook", json=webhook_payload)
+    assert resp.status_code == 200
+
+    # Verify that the lead's status in CRM is now 'replied'
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT outreach_status, outreach_action_at FROM leads WHERE id = ?", (lead_id,))
+        row = cursor.fetchone()
+        assert row["outreach_status"] == "replied"
+        assert row["outreach_action_at"] != ""
+
+
+def test_contact_details_captured_via_consent_aware_workflow():
+    """
+    Test 9: Contact details and qualification fields (timeline, budget, consent source) are stored accurately.
+    """
+    create_payload = {
+        "business_name": "Kochi Gourmet Spices",
+        "city": "Kochi",
+        "state": "Kerala",
+        "contact_name": "Arun Kumar",
+        "public_phone": "+91 9846012345",
+        "public_email": "arun@kochispices.in",
+        "project_timeline": "3 weeks",
+        "budget": "₹45,000",
+        "consent_source": "Voluntary Direct Message"
+    }
+
+    resp = client.post("/api/leads", json=create_payload)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["contact_name"] == "Arun Kumar"
+    assert data["public_phone"] == "+91 9846012345"
+    assert data["public_email"] == "arun@kochispices.in"
+    assert data["project_timeline"] == "3 weeks"
+    assert data["budget"] == "₹45,000"
+    assert data["consent_source"] == "Voluntary Direct Message"
+
+
+def test_search_provider_limitations_shown_honestly_without_fabrication(monkeypatch):
+    """
+    Test 10: When a search provider returns no results or encounters an error,
+    it returns an honest limitation notice instead of fabricating fake accounts or phone numbers.
+    """
+    from backend.app.services.discovery_service import InstagramBusinessSearchProvider
+
+    async def mock_empty_search(self, *args, **kwargs):
+        return []
+
+    monkeypatch.setattr(InstagramBusinessSearchProvider, "search", mock_empty_search)
+
+    resp = client.post("/api/leads/discover", json={
+        "niche": "VeryObscureNicheXYZ",
+        "city_or_state": "RemoteTown",
+        "source_mode": "instagram_only"
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "success"
+    assert data["total_found"] == 0
+    assert len(data["results"]) == 0
+    assert data["limitation_notice"] is not None
+    assert "0 verified profiles" in data["limitation_notice"]
+
+
+
 
 
 

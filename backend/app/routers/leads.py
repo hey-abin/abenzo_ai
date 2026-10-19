@@ -26,6 +26,18 @@ def row_to_lead(row) -> dict:
             d["evidence_json"] = json.loads(d["evidence_json"] or "{}")
         except Exception:
             d["evidence_json"] = {}
+    if isinstance(d.get("score_breakdown_json"), str):
+        try:
+            d["score_breakdown_json"] = json.loads(d["score_breakdown_json"] or "{}")
+        except Exception:
+            d["score_breakdown_json"] = {}
+    for key in (
+        "city", "instagram_handle", "contact_name", "public_phone", "public_email",
+        "suggested_service", "observed_problems", "project_timeline", "budget",
+        "consent_source", "follow_up_date", "outreach_action_at"
+    ):
+        if d.get(key) is None:
+            d[key] = ""
     return d
 
 @router.get("/metrics")
@@ -104,7 +116,7 @@ async def create_lead(lead_in: LeadCreate):
             cursor,
             lead_in.business_name,
             lead_in.website_url or "",
-            lead_in.instagram_url or ""
+            lead_in.instagram_url or lead_in.instagram_handle or ""
         )
         if dup:
             raise HTTPException(
@@ -115,16 +127,26 @@ async def create_lead(lead_in: LeadCreate):
         now = datetime.now().isoformat()
         cursor.execute("""
             INSERT INTO leads (
-                business_name, industry, state, source_url, instagram_url, website_url,
-                website_status, evidence_json, outreach_status, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, 'uncertain', '{}', 'new', ?, ?)
+                business_name, industry, state, city, source_url, instagram_url, instagram_handle,
+                website_url, website_status, evidence_json, contact_name, public_phone, public_email,
+                project_timeline, budget, consent_source, follow_up_date, outreach_status, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'uncertain', '{}', ?, ?, ?, ?, ?, ?, ?, 'new', ?, ?)
         """, (
             lead_in.business_name.strip(),
             lead_in.industry.strip() if lead_in.industry else "",
             lead_in.state.strip() if lead_in.state else "",
+            lead_in.city.strip() if lead_in.city else "",
             lead_in.source_url.strip() if lead_in.source_url else "",
             lead_in.instagram_url.strip() if lead_in.instagram_url else "",
+            lead_in.instagram_handle.strip() if lead_in.instagram_handle else "",
             lead_in.website_url.strip() if lead_in.website_url else "",
+            lead_in.contact_name.strip() if lead_in.contact_name else "",
+            lead_in.public_phone.strip() if lead_in.public_phone else "",
+            lead_in.public_email.strip() if lead_in.public_email else "",
+            lead_in.project_timeline.strip() if lead_in.project_timeline else "",
+            lead_in.budget.strip() if lead_in.budget else "",
+            lead_in.consent_source.strip() if lead_in.consent_source else "",
+            lead_in.follow_up_date.strip() if lead_in.follow_up_date else "",
             now, now
         ))
         lead_id = cursor.lastrowid
@@ -178,8 +200,11 @@ def update_lead(lead_id: int, lead_in: LeadUpdate):
         params = []
         data = lead_in.model_dump(exclude_unset=True)
 
+        if "outreach_status" in data and "outreach_action_at" not in data:
+            data["outreach_action_at"] = datetime.now().isoformat()
+
         for key, val in data.items():
-            if key == "evidence_json" and isinstance(val, dict):
+            if key in ("evidence_json", "score_breakdown_json") and isinstance(val, dict):
                 val = json.dumps(val)
             updates.append(f"{key} = ?")
             params.append(val)
@@ -372,7 +397,8 @@ def export_leads_csv():
 @router.post("/discover", response_model=LeadDiscoveryResponse)
 async def discover_public_leads(query_in: LeadDiscoveryQuery):
     """
-    Discovers publicly listed businesses via real public search and directories.
+    Discovers publicly listed businesses via Instagram-first search and public business directories.
+    Excludes listicles, wholesale portals, blogs, and non-profile URLs.
     Never fabricates results.
     """
     niche = (query_in.niche or "").strip()
@@ -386,23 +412,37 @@ async def discover_public_leads(query_in: LeadDiscoveryQuery):
     with get_db() as conn:
         cursor = conn.cursor()
         try:
-            res = await execute_lead_discovery(cursor, niche=niche, city_or_state=city_or_state, keywords=keywords, limit=limit)
+            res = await execute_lead_discovery(
+                cursor,
+                niche=niche,
+                city_or_state=city_or_state,
+                keywords=keywords,
+                source_mode=query_in.source_mode or "instagram_only",
+                stage=query_in.stage or "all",
+                website_filter=query_in.website_filter or "all",
+                min_score=query_in.min_score or 0,
+                exclude_crm=bool(query_in.exclude_crm),
+                limit=limit
+            )
             return LeadDiscoveryResponse(**res)
         except Exception as e:
             return LeadDiscoveryResponse(
                 status="error",
                 query=f"{niche} in {city_or_state} {keywords}".strip(),
-                provider="Public Directory Search",
+                provider="Instagram Business Discovery",
                 results=[],
                 total_found=0,
+                source_mode=query_in.source_mode or "instagram_only",
+                limitation_notice=None,
                 error_message=str(e)
             )
 
 @router.post("/import-discovered")
 async def import_discovered_leads(payload: ImportDiscoveredRequest):
     """
-    Imports selected discovered prospects into the CRM, tests their websites,
-    and generates AI lead scoring and personalized cold outreach drafts for human review.
+    Imports selected discovered Instagram & web prospects into the CRM,
+    preserving verified profiles, observed opportunities, fit score breakdown,
+    and personalized outreach drafts for human-reviewed outreach.
     """
     imported_leads = []
     skipped = 0
@@ -419,89 +459,87 @@ async def import_discovered_leads(payload: ImportDiscoveredRequest):
 
         with get_db() as conn:
             cursor = conn.cursor()
-            dup = check_duplicate_lead(cursor, item.business_name, item.website_url, item.instagram_url)
+            dup = check_duplicate_lead(
+                cursor,
+                business_name=item.business_name,
+                website_url=item.website_url or "",
+                instagram_url=item.instagram_url or item.instagram_handle or ""
+            )
             if dup:
                 skipped += 1
                 continue
 
             cursor.execute("""
                 INSERT INTO leads (
-                    business_name, industry, state, source_url, instagram_url, website_url,
-                    website_status, evidence_json, outreach_status, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, 'uncertain', ?, 'new', ?, ?)
+                    business_name, industry, state, city, source_url, instagram_url, instagram_handle,
+                    website_url, website_status, evidence_json, observed_problems, suggested_service,
+                    opportunity, recommended_service, lead_score, confidence, score_breakdown_json,
+                    personalized_dm, reasoning_summary, next_best_action, contact_name, public_phone,
+                    public_email, outreach_status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'high', ?, ?, ?, ?, ?, ?, ?, 'new', ?, ?)
             """, (
                 item.business_name.strip(),
                 item.industry.strip(),
                 item.state.strip(),
+                item.city.strip() if item.city else "",
                 item.source_url.strip(),
                 item.instagram_url.strip(),
+                item.instagram_handle.strip() if item.instagram_handle else "",
                 item.website_url.strip(),
-                json.dumps({"snippet": item.snippet, "contact": item.contact_details}),
-                now,
-                now
+                item.website_status or "uncertain",
+                json.dumps({
+                    "snippet": item.snippet,
+                    "contact": item.contact_details,
+                    "score_reasons": item.score_reasons,
+                    "discovered_at": item.discovered_at or now
+                }),
+                item.observed_problems or "",
+                item.suggested_service or "",
+                item.observed_problems or "",
+                item.suggested_service or "",
+                item.lead_score or 50,
+                json.dumps(item.score_breakdown or {}),
+                item.personalized_dm or "",
+                f"Discovered via {item.provider_source or 'Instagram Prospect Discovery'}. Opportunity: {item.observed_problems}",
+                "Review personalized DM draft and open verified Instagram profile to initiate human-reviewed contact",
+                item.contact_details if not (item.public_phone or item.public_email) else "",
+                item.public_phone or "",
+                item.public_email or "",
+                now, now
             ))
             lead_id = cursor.lastrowid
             conn.commit()
 
-        # Check website if website_url is present
+        # If website_url is provided, perform live website check
         web_evidence = {}
-        web_status = "uncertain"
+        web_status = item.website_status or "uncertain"
         if item.website_url:
             try:
                 check_res = await check_website(item.website_url)
                 web_status = check_res.status
                 web_evidence = check_res.model_dump()
+                with get_db() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("""
+                        UPDATE leads SET
+                            website_status = ?,
+                            evidence_json = ?,
+                            updated_at = ?
+                        WHERE id = ?
+                    """, (
+                        web_status,
+                        json.dumps({
+                            "snippet": item.snippet,
+                            "contact": item.contact_details,
+                            "score_reasons": item.score_reasons,
+                            "website_check": web_evidence
+                        }),
+                        datetime.now().isoformat(),
+                        lead_id
+                    ))
+                    conn.commit()
             except Exception:
-                web_status = "uncertain"
-
-        # AI Qualification & draft generation based on actual public evidence
-        lead_dict = {
-            "business_name": item.business_name,
-            "industry": item.industry,
-            "state": item.state,
-            "source_url": item.source_url,
-            "instagram_url": item.instagram_url,
-            "website_url": item.website_url,
-            "website_status": web_status,
-            "evidence_json": {**web_evidence, "public_snippet": item.snippet}
-        }
-
-        try:
-            ai_out = await qualify_lead_with_ai(lead_dict, agency_profile)
-            with get_db() as conn:
-                cursor = conn.cursor()
-                cursor.execute("""
-                    UPDATE leads SET
-                        website_status = ?,
-                        evidence_json = ?,
-                        business_summary = ?,
-                        lead_score = ?,
-                        confidence = ?,
-                        opportunity = ?,
-                        recommended_service = ?,
-                        personalized_dm = ?,
-                        reasoning_summary = ?,
-                        next_best_action = ?,
-                        outreach_status = 'draft',
-                        updated_at = ?
-                    WHERE id = ?
-                """, (
-                    web_status,
-                    json.dumps(lead_dict["evidence_json"]),
-                    ai_out.business_summary,
-                    ai_out.lead_score,
-                    ai_out.confidence,
-                    ai_out.opportunity,
-                    ai_out.recommended_service,
-                    ai_out.personalized_dm,
-                    ai_out.reasoning_summary,
-                    ai_out.next_best_action,
-                    datetime.now().isoformat(),
-                    lead_id
-                ))
-                conn.commit()
-        except Exception:
-            pass
+                pass
 
         with get_db() as conn:
             cursor = conn.cursor()

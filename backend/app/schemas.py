@@ -6,16 +6,27 @@ class LeadCreate(BaseModel):
     business_name: str = Field(..., min_length=1, max_length=200)
     industry: Optional[str] = ""
     state: Optional[str] = ""
+    city: Optional[str] = ""
     source_url: Optional[str] = ""
     instagram_url: Optional[str] = ""
+    instagram_handle: Optional[str] = ""
     website_url: Optional[str] = ""
+    contact_name: Optional[str] = ""
+    public_phone: Optional[str] = ""
+    public_email: Optional[str] = ""
+    project_timeline: Optional[str] = ""
+    budget: Optional[str] = ""
+    consent_source: Optional[str] = ""
+    follow_up_date: Optional[str] = ""
 
 class LeadUpdate(BaseModel):
     business_name: Optional[str] = None
     industry: Optional[str] = None
     state: Optional[str] = None
+    city: Optional[str] = None
     source_url: Optional[str] = None
     instagram_url: Optional[str] = None
+    instagram_handle: Optional[str] = None
     website_url: Optional[str] = None
     website_status: Optional[str] = None
     evidence_json: Optional[Dict[str, Any]] = None
@@ -24,18 +35,32 @@ class LeadUpdate(BaseModel):
     confidence: Optional[str] = None
     opportunity: Optional[str] = None
     recommended_service: Optional[str] = None
+    suggested_service: Optional[str] = None
+    observed_problems: Optional[str] = None
+    score_breakdown_json: Optional[Dict[str, Any]] = None
     personalized_dm: Optional[str] = None
     reasoning_summary: Optional[str] = None
     next_best_action: Optional[str] = None
     outreach_status: Optional[str] = None
+    contact_name: Optional[str] = None
+    public_phone: Optional[str] = None
+    public_email: Optional[str] = None
+    project_timeline: Optional[str] = None
+    budget: Optional[str] = None
+    consent_source: Optional[str] = None
+    follow_up_date: Optional[str] = None
+    outreach_action_at: Optional[str] = None
+    conversation_id: Optional[int] = None
 
 class LeadResponse(BaseModel):
     id: int
     business_name: str
     industry: str
     state: str
+    city: Optional[str] = ""
     source_url: str
     instagram_url: str
+    instagram_handle: Optional[str] = ""
     website_url: str
     website_status: str
     evidence_json: Dict[str, Any]
@@ -44,9 +69,21 @@ class LeadResponse(BaseModel):
     confidence: str
     opportunity: str
     recommended_service: str
+    suggested_service: Optional[str] = ""
+    observed_problems: Optional[str] = ""
+    score_breakdown_json: Optional[Dict[str, Any]] = {}
     personalized_dm: str
     reasoning_summary: str
     next_best_action: str
+    contact_name: Optional[str] = ""
+    public_phone: Optional[str] = ""
+    public_email: Optional[str] = ""
+    project_timeline: Optional[str] = ""
+    budget: Optional[str] = ""
+    consent_source: Optional[str] = ""
+    follow_up_date: Optional[str] = ""
+    outreach_action_at: Optional[str] = ""
+    conversation_id: Optional[int] = None
     outreach_status: str
     created_at: str
     updated_at: str
@@ -145,25 +182,44 @@ class LeadDiscoveryQuery(BaseModel):
     niche: Optional[str] = ""
     city_or_state: Optional[str] = ""
     keywords: Optional[str] = ""
+    source_mode: Optional[str] = "instagram_only"  # 'instagram_only' or 'all_sources'
+    stage: Optional[str] = "all"  # 'all', 'small_business', 'startup', 'local_brand'
+    website_filter: Optional[str] = "all"  # 'all', 'has_website', 'no_website', 'needs_improvement', 'unknown'
+    min_score: Optional[int] = 0
     limit: Optional[int] = 10
+    exclude_crm: Optional[bool] = False
 
 class LeadDiscoveryItem(BaseModel):
     business_name: str
+    instagram_username: Optional[str] = ""
+    instagram_handle: Optional[str] = ""
+    instagram_url: Optional[str] = ""
     website_url: Optional[str] = ""
     domain: Optional[str] = ""
-    instagram_url: Optional[str] = ""
     contact_details: Optional[str] = ""
+    public_phone: Optional[str] = ""
+    public_email: Optional[str] = ""
     source_url: str = ""
     industry: Optional[str] = ""
+    business_category: Optional[str] = ""
     state: Optional[str] = ""
+    city: Optional[str] = ""
     snippet: Optional[str] = ""
+    business_stage: Optional[str] = "small_business"
+    website_status: Optional[str] = "unknown"
+    observed_problems: Optional[str] = ""
+    suggested_service: Optional[str] = ""
+    personalized_dm: Optional[str] = ""
+    lead_score: int = 50
+    score_reasons: List[str] = []
+    score_breakdown: Optional[Dict[str, int]] = {}
     already_exists: bool = False
     is_duplicate: bool = False
     existing_lead_id: Optional[int] = None
-    lead_score: int = 50
-    score_reasons: List[str] = []
     reachable: bool = True
     status_code: Optional[int] = 200
+    discovered_at: Optional[str] = ""
+    provider_source: Optional[str] = ""
 
 class LeadDiscoveryResponse(BaseModel):
     status: str
@@ -171,6 +227,8 @@ class LeadDiscoveryResponse(BaseModel):
     provider: str
     results: List[LeadDiscoveryItem] = []
     total_found: int = 0
+    source_mode: Optional[str] = "instagram_only"
+    limitation_notice: Optional[str] = None
     error_message: Optional[str] = None
 
 class ImportDiscoveredRequest(BaseModel):

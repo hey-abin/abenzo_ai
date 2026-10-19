@@ -311,6 +311,29 @@ async def receive_meta_webhook(
                         """, (sender_id, sender_id, f"IG User ({sender_id[:8]})", now, now))
                         conv_id = cursor.lastrowid
 
+                    # Link conversation to CRM lead if present, load business context, and update lead to 'replied'
+                    cursor.execute("""
+                        SELECT id, business_name, suggested_service, observed_problems, website_status, outreach_status
+                        FROM leads
+                        WHERE conversation_id = ? OR id = (SELECT lead_id FROM conversations WHERE id = ?)
+                    """, (conv_id, conv_id))
+                    matched_lead = cursor.fetchone()
+                    if matched_lead:
+                        if matched_lead["outreach_status"] in ("new", "draft", "contacted", "reviewed", "followed"):
+                            cursor.execute("""
+                                UPDATE leads SET
+                                    outreach_status = 'replied',
+                                    outreach_action_at = ?,
+                                    updated_at = ?
+                                WHERE id = ?
+                            """, (now, now, matched_lead["id"]))
+                        if matched_lead["business_name"]:
+                            lead_context["prospect_business_name"] = matched_lead["business_name"]
+                        if matched_lead["suggested_service"]:
+                            lead_context["suggested_service"] = matched_lead["suggested_service"]
+                        if matched_lead["observed_problems"]:
+                            lead_context["observed_problems"] = matched_lead["observed_problems"]
+
                     # Fetch recent chronological conversation context (isolated to this conversation)
                     cursor.execute("""
                         SELECT direction, message_text, approved_text, ai_draft
