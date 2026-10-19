@@ -140,7 +140,8 @@ function LeadsContent() {
     website_filter: "all",
     min_score: 0,
     limit: 10,
-    exclude_crm: true
+    exclude_crm: true,
+    search_provider: "auto"
   });
   const [discovering, setDiscovering] = useState(false);
   const [discoveryResults, setDiscoveryResults] = useState([]);
@@ -350,7 +351,8 @@ function LeadsContent() {
         website_filter: discoveryQuery.website_filter,
         min_score: parseInt(discoveryQuery.min_score, 10) || 0,
         exclude_crm: discoveryQuery.exclude_crm,
-        limit: parseInt(discoveryQuery.limit, 10) || 10
+        limit: parseInt(discoveryQuery.limit, 10) || 10,
+        search_provider: discoveryQuery.search_provider || "auto"
       });
       setDiscoveryResults(res.results || []);
       setDiscoveryLimitation(res.limitation_notice);
@@ -1216,6 +1218,19 @@ function LeadsContent() {
                   </div>
 
                   <div className="flex items-center gap-1.5">
+                    <span className="text-zinc-500">Provider:</span>
+                    <select
+                      value={discoveryQuery.search_provider || "auto"}
+                      onChange={(e) => setDiscoveryQuery({ ...discoveryQuery, search_provider: e.target.value })}
+                      className="rounded border border-zinc-200 bg-white p-1 text-[11px] dark:border-zinc-700 dark:bg-zinc-800"
+                    >
+                      <option value="auto">Auto (DDG + Serper Fallback)</option>
+                      <option value="serper">Google (Serper API)</option>
+                      <option value="duckduckgo">DuckDuckGo (Free)</option>
+                    </select>
+                  </div>
+
+                  <div className="flex items-center gap-1.5">
                     <span className="text-zinc-500">Min Fit:</span>
                     <select
                       value={discoveryQuery.min_score}
@@ -1265,34 +1280,55 @@ function LeadsContent() {
               ) : discoveryResults.length > 0 ? (
                 <div className="space-y-3">
                   {discoveryDiagnostics && (
-                    <div className="rounded-md bg-zinc-100/80 px-3 py-1.5 text-[11px] text-zinc-600 dark:bg-zinc-800/60 dark:text-zinc-300 flex flex-wrap items-center justify-between gap-2 border border-zinc-200/60 dark:border-zinc-700/60">
-                      <div className="flex items-center gap-1.5">
-                        <span className="font-semibold text-zinc-800 dark:text-zinc-200">
-                          Provider: {discoveryDiagnostics.provider_used || "DuckDuckGo"}
-                        </span>
-                        {discoveryDiagnostics.fallback_used && (
-                          <span className="rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-300">
-                            Secondary Fallback Active
+                    <div className="rounded-md bg-zinc-100/80 p-2.5 text-[11px] text-zinc-600 dark:bg-zinc-800/60 dark:text-zinc-300 space-y-1.5 border border-zinc-200/60 dark:border-zinc-700/60">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="font-semibold text-zinc-800 dark:text-zinc-200">
+                            Provider: {discoveryDiagnostics.selected_provider || discoveryDiagnostics.provider_used || "DuckDuckGo"}
                           </span>
-                        )}
+                          <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${
+                            discoveryDiagnostics.key_configured
+                              ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300"
+                              : "bg-zinc-200 text-zinc-700 dark:bg-zinc-700 dark:text-zinc-300"
+                          }`}>
+                            {discoveryDiagnostics.key_configured ? "Key Configured" : "Key Not Configured"}
+                          </span>
+                          {discoveryDiagnostics.provider_request_status && (
+                            <span className="rounded bg-zinc-200/80 px-1.5 py-0.5 text-[10px] text-zinc-700 dark:bg-zinc-700/70 dark:text-zinc-300 font-mono">
+                              {discoveryDiagnostics.provider_request_status}
+                            </span>
+                          )}
+                          {discoveryDiagnostics.fallback_used && (
+                            <span className="rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-300">
+                              Fallback Used
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-2 text-[10px] text-zinc-500 dark:text-zinc-400">
+                          <span>{discoveryDiagnostics.raw_results_count} raw fetched</span>
+                          <span>•</span>
+                          <span className="text-emerald-600 dark:text-emerald-400 font-semibold">{discoveryResults.length} verified profiles</span>
+                          {discoveryDiagnostics.rejected_counts?.non_profile_path > 0 && (
+                            <>
+                              <span>•</span>
+                              <span>{discoveryDiagnostics.rejected_counts.non_profile_path} posts/reels rejected</span>
+                            </>
+                          )}
+                          {discoveryDiagnostics.duplicates_removed > 0 && (
+                            <>
+                              <span>•</span>
+                              <span>{discoveryDiagnostics.duplicates_removed} duplicates removed</span>
+                            </>
+                          )}
+                        </div>
                       </div>
-                      <div className="flex items-center gap-2 text-[10px] text-zinc-500 dark:text-zinc-400">
-                        <span>{discoveryDiagnostics.raw_results_count} raw fetched</span>
-                        <span>•</span>
-                        <span className="text-emerald-600 dark:text-emerald-400 font-semibold">{discoveryResults.length} verified profiles</span>
-                        {discoveryDiagnostics.rejected_counts?.non_profile_path > 0 && (
-                          <>
-                            <span>•</span>
-                            <span>{discoveryDiagnostics.rejected_counts.non_profile_path} posts/reels rejected</span>
-                          </>
-                        )}
-                        {discoveryDiagnostics.duplicates_removed > 0 && (
-                          <>
-                            <span>•</span>
-                            <span>{discoveryDiagnostics.duplicates_removed} duplicates removed</span>
-                          </>
-                        )}
-                      </div>
+
+                      {discoveryDiagnostics.fallback_attempts?.length > 0 && (
+                        <div className="text-[10px] text-zinc-500 dark:text-zinc-400 pt-1 border-t border-zinc-200/60 dark:border-zinc-700/50">
+                          <span className="font-semibold text-zinc-700 dark:text-zinc-300">Provider Attempts: </span>
+                          {discoveryDiagnostics.fallback_attempts.join(" • ")}
+                        </div>
+                      )}
                     </div>
                   )}
 
@@ -1462,38 +1498,66 @@ function LeadsContent() {
                     })}
                   </div>
                 </div>
-              ) : discoveryDiagnostics && discoveryDiagnostics.provider_status === "rate_limited_202" ? (
-                /* Condition A: Provider Rate-Limited / Bot Challenged (HTTP 202) */
+              ) : discoveryDiagnostics && (discoveryDiagnostics.provider_status === "rate_limited_202" || discoveryDiagnostics.provider_status === "rate_limited_429" || discoveryDiagnostics.provider_status === "unauthorized_401") ? (
+                /* Condition A: Provider Rate-Limited / Bot Challenged (HTTP 202) / Unauthorized */
                 <div className="p-6 text-left text-xs bg-amber-50/60 rounded-lg border border-amber-300/80 dark:bg-amber-950/30 dark:border-amber-700/60 space-y-3">
                   <div className="flex items-start gap-2.5">
                     <AlertTriangle className="h-5 w-5 text-amber-600 shrink-0 mt-0.5" />
                     <div>
                       <h4 className="font-bold text-amber-950 dark:text-amber-200 text-sm">
-                        Search Provider Rate-Limited / Bot Challenge (HTTP 202)
+                        {discoveryDiagnostics.provider_used || discoveryDiagnostics.selected_provider || "Search Provider"} — {discoveryDiagnostics.provider_request_status || "Rate Limited"}
                       </h4>
                       <p className="mt-1 text-amber-900/90 dark:text-amber-300/90 leading-relaxed">
-                        DuckDuckGo challenged automated queries from this server&apos;s IP address. No raw results could be inspected.
+                        {discoveryLimitation || "Search provider challenge or rate-limit prevented retrieving live profile listings."}
                       </p>
                     </div>
                   </div>
 
-                  <div className="rounded-md bg-amber-100/70 p-3 text-[11px] text-amber-950 dark:bg-amber-900/40 dark:text-amber-200 border border-amber-300/60">
-                    <p className="font-semibold mb-1">💡 Solution for Uninterrupted Discovery on Cloud Servers:</p>
-                    <p className="leading-relaxed">
-                      Datacenter hosting platforms (like Render) are frequently challenged by DuckDuckGo. To enable guaranteed, fast discovery, set a secondary search provider API key in your environment variables:
-                    </p>
-                    <ul className="list-disc list-inside mt-1.5 space-y-0.5 font-mono text-[10px]">
-                      <li><strong className="font-sans">Google via Serper:</strong> SERPER_API_KEY (2,500 free queries at serper.dev)</li>
-                      <li><strong className="font-sans">Tavily AI Search:</strong> TAVILY_API_KEY (1,000 free queries at tavily.com)</li>
-                      <li><strong className="font-sans">Brave Search:</strong> BRAVE_SEARCH_API_KEY (2,000 free queries at brave.com)</li>
-                    </ul>
+                  {/* Safe Diagnostics Stats Grid */}
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1 text-center">
+                    <div className="p-2 rounded bg-white dark:bg-zinc-800 border border-amber-200 dark:border-zinc-700">
+                      <div className="text-xs font-bold text-zinc-900 dark:text-zinc-100 truncate">
+                        {discoveryDiagnostics.selected_provider || discoveryDiagnostics.provider_used || "DuckDuckGo"}
+                      </div>
+                      <div className="text-[10px] text-zinc-500">Provider</div>
+                    </div>
+                    <div className="p-2 rounded bg-white dark:bg-zinc-800 border border-amber-200 dark:border-zinc-700">
+                      <div className={`text-xs font-bold ${discoveryDiagnostics.key_configured ? "text-emerald-600" : "text-amber-600"}`}>
+                        {discoveryDiagnostics.key_configured ? "Configured (Yes)" : "Not Set (No)"}
+                      </div>
+                      <div className="text-[10px] text-zinc-500">API Key</div>
+                    </div>
+                    <div className="p-2 rounded bg-white dark:bg-zinc-800 border border-amber-200 dark:border-zinc-700">
+                      <div className="text-xs font-bold text-amber-700 dark:text-amber-400 font-mono">
+                        {discoveryDiagnostics.provider_request_status || "HTTP 202"}
+                      </div>
+                      <div className="text-[10px] text-zinc-500">Status</div>
+                    </div>
+                    <div className="p-2 rounded bg-white dark:bg-zinc-800 border border-amber-200 dark:border-zinc-700">
+                      <div className="text-xs font-bold text-zinc-900 dark:text-zinc-100">
+                        {discoveryDiagnostics.raw_results_count || 0}
+                      </div>
+                      <div className="text-[10px] text-zinc-500">Raw Results</div>
+                    </div>
                   </div>
 
-                  {discoveryDiagnostics.queries_executed?.length > 0 && (
-                    <div className="text-[11px] text-zinc-500 dark:text-zinc-400">
-                      <strong>Attempted Queries:</strong> {discoveryDiagnostics.queries_executed.join(" • ")}
+                  {discoveryDiagnostics.fallback_attempts?.length > 0 && (
+                    <div className="rounded bg-amber-100/60 p-2.5 text-[11px] text-amber-950 dark:bg-amber-900/30 dark:text-amber-200 space-y-1">
+                      <p className="font-semibold">Provider Fallback Attempts:</p>
+                      <ul className="list-disc list-inside space-y-0.5 font-mono text-[10px]">
+                        {discoveryDiagnostics.fallback_attempts.map((att, i) => (
+                          <li key={i}>{att}</li>
+                        ))}
+                      </ul>
                     </div>
                   )}
+
+                  <div className="rounded-md bg-amber-100/70 p-3 text-[11px] text-amber-950 dark:bg-amber-900/40 dark:text-amber-200 border border-amber-300/60">
+                    <p className="font-semibold mb-1">💡 Solution for Fast, Reliable Discovery on Cloud Servers:</p>
+                    <p className="leading-relaxed">
+                      Datacenter hosting platforms (like Render) are frequently bot-challenged by DuckDuckGo. Switch Provider to <strong>Google (Serper API)</strong> or ensure <code>SERPER_API_KEY</code> is set in Render environment variables.
+                    </p>
+                  </div>
                 </div>
               ) : discoveryDiagnostics && discoveryDiagnostics.raw_results_count > 0 && discoveryDiagnostics.valid_profiles_count === 0 ? (
                 /* Condition B: Raw Results Received but Rejected by Validation */
@@ -1505,7 +1569,7 @@ function LeadsContent() {
                         Results Received but Rejected by Profile Validation
                       </h4>
                       <p className="mt-1 text-indigo-900/90 dark:text-indigo-300/90 leading-relaxed">
-                        The search provider returned {discoveryDiagnostics.raw_results_count} results, but none passed strict validation for genuine, individual business Instagram profiles.
+                        The search provider ({discoveryDiagnostics.selected_provider || discoveryDiagnostics.provider_used}) returned {discoveryDiagnostics.raw_results_count} results, but none passed strict validation for genuine, individual business Instagram profiles.
                       </p>
                     </div>
                   </div>
@@ -1529,15 +1593,59 @@ function LeadsContent() {
                     </div>
                   </div>
 
+                  {discoveryDiagnostics.fallback_attempts?.length > 0 && (
+                    <div className="text-[10px] text-zinc-500 dark:text-zinc-400 pt-1">
+                      <span className="font-semibold text-zinc-700 dark:text-zinc-300">Provider Attempts: </span>
+                      {discoveryDiagnostics.fallback_attempts.join(" • ")}
+                    </div>
+                  )}
+
                   <p className="text-[11px] text-zinc-500 dark:text-zinc-400 pt-1">
                     Tip: Try searching for a specific niche category (e.g. &ldquo;Clothing Boutiques&rdquo; or &ldquo;Cafes & Roasteries&rdquo;) or switch from &ldquo;Instagram Profiles Only&rdquo; to &ldquo;All Public Business Sources&rdquo;.
                   </p>
                 </div>
               ) : discoveryLimitation ? (
                 /* Condition C: Provider Returned Zero Results */
-                <div className="p-6 text-center text-xs text-zinc-600 dark:text-zinc-400 bg-zinc-50/70 rounded-lg border border-zinc-200 dark:bg-zinc-800/40 dark:border-zinc-700/60 space-y-2">
+                <div className="p-6 text-center text-xs text-zinc-600 dark:text-zinc-400 bg-zinc-50/70 rounded-lg border border-zinc-200 dark:bg-zinc-800/40 dark:border-zinc-700/60 space-y-3">
                   <Info className="h-6 w-6 text-zinc-400 mx-auto" />
                   <p className="font-semibold text-zinc-800 dark:text-zinc-200">{discoveryLimitation}</p>
+
+                  {/* Safe Diagnostics Info Card */}
+                  {discoveryDiagnostics && (
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-center max-w-lg mx-auto py-1">
+                      <div className="p-2 rounded bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700">
+                        <div className="text-xs font-bold text-zinc-900 dark:text-zinc-100 truncate">
+                          {discoveryDiagnostics.selected_provider || discoveryDiagnostics.provider_used || "DuckDuckGo"}
+                        </div>
+                        <div className="text-[10px] text-zinc-500">Provider</div>
+                      </div>
+                      <div className="p-2 rounded bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700">
+                        <div className={`text-xs font-bold ${discoveryDiagnostics.key_configured ? "text-emerald-600" : "text-zinc-500"}`}>
+                          {discoveryDiagnostics.key_configured ? "Configured (Yes)" : "Not Set (No)"}
+                        </div>
+                        <div className="text-[10px] text-zinc-500">API Key</div>
+                      </div>
+                      <div className="p-2 rounded bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700">
+                        <div className="text-xs font-bold text-zinc-700 dark:text-zinc-300 font-mono">
+                          {discoveryDiagnostics.provider_request_status || "HTTP 200 OK"}
+                        </div>
+                        <div className="text-[10px] text-zinc-500">Status</div>
+                      </div>
+                      <div className="p-2 rounded bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700">
+                        <div className="text-xs font-bold text-zinc-900 dark:text-zinc-100">
+                          {discoveryDiagnostics.raw_results_count || 0}
+                        </div>
+                        <div className="text-[10px] text-zinc-500">Raw Results</div>
+                      </div>
+                    </div>
+                  )}
+
+                  {discoveryDiagnostics?.fallback_attempts?.length > 0 && (
+                    <div className="text-[10px] text-zinc-500 dark:text-zinc-400">
+                      <strong>Provider Attempts:</strong> {discoveryDiagnostics.fallback_attempts.join(" • ")}
+                    </div>
+                  )}
+
                   {discoveryDiagnostics?.queries_executed?.length > 0 && (
                     <p className="text-[11px] text-zinc-400">
                       Queries executed: {discoveryDiagnostics.queries_executed.join(" • ")}

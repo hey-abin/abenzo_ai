@@ -59,6 +59,31 @@ class Settings(BaseSettings):
     SERPAPI_API_KEY: str = ""
     SEARCH_TIMEOUT_SECONDS: int = 15
 
+    @property
+    def effective_search_provider(self) -> str:
+        import os
+        return (os.environ.get("SEARCH_PROVIDER") or self.SEARCH_PROVIDER or "auto").strip().lower()
+
+    @property
+    def effective_serper_key(self) -> str:
+        import os
+        return (os.environ.get("SERPER_API_KEY") or self.SERPER_API_KEY or "").strip()
+
+    @property
+    def effective_tavily_key(self) -> str:
+        import os
+        return (os.environ.get("TAVILY_API_KEY") or self.TAVILY_API_KEY or "").strip()
+
+    @property
+    def effective_brave_key(self) -> str:
+        import os
+        return (os.environ.get("BRAVE_SEARCH_API_KEY") or self.BRAVE_SEARCH_API_KEY or "").strip()
+
+    @property
+    def effective_serpapi_key(self) -> str:
+        import os
+        return (os.environ.get("SERPAPI_API_KEY") or self.SERPAPI_API_KEY or "").strip()
+
     # CORS configuration
     CORS_ORIGINS: str = ""
 

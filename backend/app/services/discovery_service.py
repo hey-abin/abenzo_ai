@@ -456,6 +456,10 @@ def evaluate_digital_opportunity(
 
 class SearchProviderBase:
     name: str = "Base"
+    requires_api_key: bool = False
+
+    def has_key_configured(self) -> bool:
+        return False
 
     def is_configured(self) -> bool:
         raise NotImplementedError
@@ -476,6 +480,10 @@ class DuckDuckGoSearchProvider(SearchProviderBase):
     Detects HTTP 202 Bot Challenge and rate limits transparently.
     """
     name: str = "DuckDuckGo"
+    requires_api_key: bool = False
+
+    def has_key_configured(self) -> bool:
+        return False
 
     def is_configured(self) -> bool:
         return True
@@ -515,19 +523,22 @@ class DuckDuckGoSearchProvider(SearchProviderBase):
 
                 try:
                     resp = await client.post("https://lite.duckduckgo.com/lite/", data={"q": q})
-                    
+
                     if resp.status_code == 202:
                         diagnostics["rate_limits"] += 1
                         diagnostics["provider_status"] = "rate_limited_202"
+                        diagnostics["provider_request_status"] = "HTTP 202 Bot Challenge"
                         diagnostics["provider_error_message"] = "DuckDuckGo returned HTTP 202 Bot Challenge from this server IP."
                         logger.warning(f"DuckDuckGo HTTP 202 Bot Challenge for query: '{q}'")
-                        # Do not keep retrying DDG if challenged with 202
+                        # Do not keep retrying DDG indefinitely after a bot challenge
                         break
 
                     if resp.status_code != 200:
                         diagnostics["provider_errors"] += 1
+                        diagnostics["provider_request_status"] = f"HTTP {resp.status_code}"
                         continue
 
+                    diagnostics["provider_request_status"] = "HTTP 200 OK"
                     soup = BeautifulSoup(resp.text, "html.parser")
                     links = soup.find_all("a", class_="result-link")
                     snippets = soup.find_all("td", class_="result-snippet")
@@ -556,10 +567,12 @@ class DuckDuckGoSearchProvider(SearchProviderBase):
                 except httpx.TimeoutException:
                     diagnostics["timeouts"] += 1
                     diagnostics["provider_status"] = "timeout"
+                    diagnostics["provider_request_status"] = "Timeout"
                     logger.warning(f"DuckDuckGo timeout for query: '{q}'")
                 except Exception as e:
                     diagnostics["provider_errors"] += 1
                     diagnostics["provider_status"] = "error"
+                    diagnostics["provider_request_status"] = f"Error: {type(e).__name__}"
                     logger.warning(f"DuckDuckGo search error: {e}")
 
         return raw_results
@@ -567,13 +580,21 @@ class DuckDuckGoSearchProvider(SearchProviderBase):
 
 class SerperSearchProvider(SearchProviderBase):
     """
-    Secondary Provider: Google Search via Serper API (https://google.serper.dev/search).
+    Google Search via Serper API (https://google.serper.dev/search).
     Requires SERPER_API_KEY.
     """
     name: str = "Google (Serper API)"
+    requires_api_key: bool = True
+
+    def get_api_key(self) -> str:
+        import os
+        return (os.environ.get("SERPER_API_KEY") or settings.effective_serper_key or "").strip()
+
+    def has_key_configured(self) -> bool:
+        return bool(self.get_api_key())
 
     def is_configured(self) -> bool:
-        return bool((settings.SERPER_API_KEY or "").strip())
+        return self.has_key_configured()
 
     async def search(
         self,
@@ -585,7 +606,15 @@ class SerperSearchProvider(SearchProviderBase):
         import httpx
 
         raw_results = []
-        api_key = settings.SERPER_API_KEY.strip()
+        api_key = self.get_api_key()
+
+        if not api_key:
+            diagnostics["provider_errors"] += 1
+            diagnostics["provider_status"] = "error"
+            diagnostics["provider_request_status"] = "Missing SERPER_API_KEY"
+            logger.warning("Serper search requested but SERPER_API_KEY is not configured.")
+            return []
+
         headers = {
             "X-API-KEY": api_key,
             "Content-Type": "application/json"
@@ -598,30 +627,47 @@ class SerperSearchProvider(SearchProviderBase):
                 try:
                     payload = {"q": q, "gl": "in", "num": limit * 2}
                     resp = await client.post("https://google.serper.dev/search", json=payload, headers=headers)
-                    if resp.status_code == 429:
+                    if resp.status_code == 200:
+                        diagnostics["provider_request_status"] = "HTTP 200 OK"
+                        data = resp.json()
+                        for item in data.get("organic", []):
+                            raw_results.append({
+                                "raw_title": item.get("title", ""),
+                                "target_url": item.get("link", ""),
+                                "snippet": item.get("snippet", "")
+                            })
+                            diagnostics["raw_results_count"] += 1
+                    elif resp.status_code == 429:
                         diagnostics["rate_limits"] += 1
                         diagnostics["provider_status"] = "rate_limited_429"
+                        diagnostics["provider_request_status"] = "HTTP 429 Rate Limited"
                         break
-                    if resp.status_code != 200:
+                    elif resp.status_code == 401:
                         diagnostics["provider_errors"] += 1
+                        diagnostics["provider_status"] = "unauthorized_401"
+                        diagnostics["provider_request_status"] = "HTTP 401 Unauthorized"
+                        break
+                    elif resp.status_code == 403:
+                        diagnostics["provider_errors"] += 1
+                        diagnostics["provider_status"] = "forbidden_403"
+                        diagnostics["provider_request_status"] = "HTTP 403 Forbidden"
+                        break
+                    else:
+                        diagnostics["provider_errors"] += 1
+                        diagnostics["provider_request_status"] = f"HTTP {resp.status_code}"
                         continue
-
-                    data = resp.json()
-                    for item in data.get("organic", []):
-                        raw_results.append({
-                            "raw_title": item.get("title", ""),
-                            "target_url": item.get("link", ""),
-                            "snippet": item.get("snippet", "")
-                        })
-                        diagnostics["raw_results_count"] += 1
 
                     if len(raw_results) >= limit * 2:
                         break
 
                 except httpx.TimeoutException:
                     diagnostics["timeouts"] += 1
+                    diagnostics["provider_status"] = "timeout"
+                    diagnostics["provider_request_status"] = "Timeout"
                 except Exception as e:
                     diagnostics["provider_errors"] += 1
+                    diagnostics["provider_status"] = "error"
+                    diagnostics["provider_request_status"] = f"Error: {type(e).__name__}"
                     logger.warning(f"Serper API search error: {e}")
 
         return raw_results
@@ -633,9 +679,17 @@ class TavilySearchProvider(SearchProviderBase):
     Requires TAVILY_API_KEY.
     """
     name: str = "Tavily Search API"
+    requires_api_key: bool = True
+
+    def get_api_key(self) -> str:
+        import os
+        return (os.environ.get("TAVILY_API_KEY") or settings.effective_tavily_key or "").strip()
+
+    def has_key_configured(self) -> bool:
+        return bool(self.get_api_key())
 
     def is_configured(self) -> bool:
-        return bool((settings.TAVILY_API_KEY or "").strip())
+        return self.has_key_configured()
 
     async def search(
         self,
@@ -647,7 +701,11 @@ class TavilySearchProvider(SearchProviderBase):
         import httpx
 
         raw_results = []
-        api_key = settings.TAVILY_API_KEY.strip()
+        api_key = self.get_api_key()
+        if not api_key:
+            diagnostics["provider_request_status"] = "Missing TAVILY_API_KEY"
+            return []
+
         timeout = float(settings.SEARCH_TIMEOUT_SECONDS or 14.0)
 
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -663,30 +721,35 @@ class TavilySearchProvider(SearchProviderBase):
                         payload["include_domains"] = ["instagram.com"]
 
                     resp = await client.post("https://api.tavily.com/search", json=payload)
-                    if resp.status_code == 429:
+                    if resp.status_code == 200:
+                        diagnostics["provider_request_status"] = "HTTP 200 OK"
+                        data = resp.json()
+                        for item in data.get("results", []):
+                            raw_results.append({
+                                "raw_title": item.get("title", ""),
+                                "target_url": item.get("url", ""),
+                                "snippet": item.get("content", "")
+                            })
+                            diagnostics["raw_results_count"] += 1
+                    elif resp.status_code == 429:
                         diagnostics["rate_limits"] += 1
                         diagnostics["provider_status"] = "rate_limited_429"
+                        diagnostics["provider_request_status"] = "HTTP 429 Rate Limited"
                         break
-                    if resp.status_code != 200:
+                    else:
                         diagnostics["provider_errors"] += 1
+                        diagnostics["provider_request_status"] = f"HTTP {resp.status_code}"
                         continue
-
-                    data = resp.json()
-                    for item in data.get("results", []):
-                        raw_results.append({
-                            "raw_title": item.get("title", ""),
-                            "target_url": item.get("url", ""),
-                            "snippet": item.get("content", "")
-                        })
-                        diagnostics["raw_results_count"] += 1
 
                     if len(raw_results) >= limit * 2:
                         break
 
                 except httpx.TimeoutException:
                     diagnostics["timeouts"] += 1
+                    diagnostics["provider_request_status"] = "Timeout"
                 except Exception as e:
                     diagnostics["provider_errors"] += 1
+                    diagnostics["provider_request_status"] = f"Error: {type(e).__name__}"
                     logger.warning(f"Tavily search error: {e}")
 
         return raw_results
@@ -698,9 +761,17 @@ class BraveSearchProvider(SearchProviderBase):
     Requires BRAVE_SEARCH_API_KEY.
     """
     name: str = "Brave Search API"
+    requires_api_key: bool = True
+
+    def get_api_key(self) -> str:
+        import os
+        return (os.environ.get("BRAVE_SEARCH_API_KEY") or settings.effective_brave_key or "").strip()
+
+    def has_key_configured(self) -> bool:
+        return bool(self.get_api_key())
 
     def is_configured(self) -> bool:
-        return bool((settings.BRAVE_SEARCH_API_KEY or "").strip())
+        return self.has_key_configured()
 
     async def search(
         self,
@@ -712,7 +783,11 @@ class BraveSearchProvider(SearchProviderBase):
         import httpx
 
         raw_results = []
-        api_key = settings.BRAVE_SEARCH_API_KEY.strip()
+        api_key = self.get_api_key()
+        if not api_key:
+            diagnostics["provider_request_status"] = "Missing BRAVE_SEARCH_API_KEY"
+            return []
+
         headers = {"X-Subscription-Token": api_key}
         timeout = float(settings.SEARCH_TIMEOUT_SECONDS or 14.0)
 
@@ -725,30 +800,35 @@ class BraveSearchProvider(SearchProviderBase):
                         params={"q": q, "count": limit * 2},
                         headers=headers
                     )
-                    if resp.status_code == 429:
+                    if resp.status_code == 200:
+                        diagnostics["provider_request_status"] = "HTTP 200 OK"
+                        data = resp.json()
+                        for item in data.get("web", {}).get("results", []):
+                            raw_results.append({
+                                "raw_title": item.get("title", ""),
+                                "target_url": item.get("url", ""),
+                                "snippet": item.get("description", "")
+                            })
+                            diagnostics["raw_results_count"] += 1
+                    elif resp.status_code == 429:
                         diagnostics["rate_limits"] += 1
                         diagnostics["provider_status"] = "rate_limited_429"
+                        diagnostics["provider_request_status"] = "HTTP 429 Rate Limited"
                         break
-                    if resp.status_code != 200:
+                    else:
                         diagnostics["provider_errors"] += 1
+                        diagnostics["provider_request_status"] = f"HTTP {resp.status_code}"
                         continue
-
-                    data = resp.json()
-                    for item in data.get("web", {}).get("results", []):
-                        raw_results.append({
-                            "raw_title": item.get("title", ""),
-                            "target_url": item.get("url", ""),
-                            "snippet": item.get("description", "")
-                        })
-                        diagnostics["raw_results_count"] += 1
 
                     if len(raw_results) >= limit * 2:
                         break
 
                 except httpx.TimeoutException:
                     diagnostics["timeouts"] += 1
+                    diagnostics["provider_request_status"] = "Timeout"
                 except Exception as e:
                     diagnostics["provider_errors"] += 1
+                    diagnostics["provider_request_status"] = f"Error: {type(e).__name__}"
                     logger.warning(f"Brave search error: {e}")
 
         return raw_results
@@ -760,9 +840,17 @@ class SerpApiSearchProvider(SearchProviderBase):
     Requires SERPAPI_API_KEY.
     """
     name: str = "SerpApi"
+    requires_api_key: bool = True
+
+    def get_api_key(self) -> str:
+        import os
+        return (os.environ.get("SERPAPI_API_KEY") or settings.effective_serpapi_key or "").strip()
+
+    def has_key_configured(self) -> bool:
+        return bool(self.get_api_key())
 
     def is_configured(self) -> bool:
-        return bool((settings.SERPAPI_API_KEY or "").strip())
+        return self.has_key_configured()
 
     async def search(
         self,
@@ -774,7 +862,11 @@ class SerpApiSearchProvider(SearchProviderBase):
         import httpx
 
         raw_results = []
-        api_key = settings.SERPAPI_API_KEY.strip()
+        api_key = self.get_api_key()
+        if not api_key:
+            diagnostics["provider_request_status"] = "Missing SERPAPI_API_KEY"
+            return []
+
         timeout = float(settings.SEARCH_TIMEOUT_SECONDS or 14.0)
 
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -785,62 +877,67 @@ class SerpApiSearchProvider(SearchProviderBase):
                         "https://serpapi.com/search.json",
                         params={"q": q, "api_key": api_key, "engine": "google", "num": limit * 2}
                     )
-                    if resp.status_code == 429:
+                    if resp.status_code == 200:
+                        diagnostics["provider_request_status"] = "HTTP 200 OK"
+                        data = resp.json()
+                        for item in data.get("organic_results", []):
+                            raw_results.append({
+                                "raw_title": item.get("title", ""),
+                                "target_url": item.get("link", ""),
+                                "snippet": item.get("snippet", "")
+                            })
+                            diagnostics["raw_results_count"] += 1
+                    elif resp.status_code == 429:
                         diagnostics["rate_limits"] += 1
                         diagnostics["provider_status"] = "rate_limited_429"
+                        diagnostics["provider_request_status"] = "HTTP 429 Rate Limited"
                         break
-                    if resp.status_code != 200:
+                    else:
                         diagnostics["provider_errors"] += 1
+                        diagnostics["provider_request_status"] = f"HTTP {resp.status_code}"
                         continue
-
-                    data = resp.json()
-                    for item in data.get("organic_results", []):
-                        raw_results.append({
-                            "raw_title": item.get("title", ""),
-                            "target_url": item.get("link", ""),
-                            "snippet": item.get("snippet", "")
-                        })
-                        diagnostics["raw_results_count"] += 1
 
                     if len(raw_results) >= limit * 2:
                         break
 
                 except httpx.TimeoutException:
                     diagnostics["timeouts"] += 1
+                    diagnostics["provider_request_status"] = "Timeout"
                 except Exception as e:
                     diagnostics["provider_errors"] += 1
+                    diagnostics["provider_request_status"] = f"Error: {type(e).__name__}"
                     logger.warning(f"SerpApi search error: {e}")
 
         return raw_results
 
 
-def get_search_pipeline() -> Tuple[SearchProviderBase, List[SearchProviderBase]]:
+def get_search_pipeline(requested_provider: Optional[str] = None) -> Tuple[SearchProviderBase, List[SearchProviderBase]]:
     """
     Selects primary and secondary search providers according to configuration.
+    Dynamically checks os.environ and settings.
     """
+    import os
     ddg = DuckDuckGoSearchProvider()
-    secondaries = [
-        SerperSearchProvider(),
-        TavilySearchProvider(),
-        BraveSearchProvider(),
-        SerpApiSearchProvider()
-    ]
-    configured_secondaries = [p for p in secondaries if p.is_configured()]
+    serper = SerperSearchProvider()
+    tavily = TavilySearchProvider()
+    brave = BraveSearchProvider()
+    serpapi = SerpApiSearchProvider()
 
-    pref = (settings.SEARCH_PROVIDER or "auto").strip().lower()
-    if pref == "serper":
-        return SerperSearchProvider(), [ddg]
+    pref = (requested_provider or os.environ.get("SEARCH_PROVIDER") or settings.effective_search_provider or "auto").strip().lower()
+
+    if pref in ("serper", "google"):
+        return serper, [ddg, tavily, brave, serpapi]
     elif pref == "tavily":
-        return TavilySearchProvider(), [ddg]
+        return tavily, [serper, ddg, brave, serpapi]
     elif pref == "brave":
-        return BraveSearchProvider(), [ddg]
+        return brave, [serper, ddg, tavily, serpapi]
     elif pref == "serpapi":
-        return SerpApiSearchProvider(), [ddg]
-    elif pref == "duckduckgo":
-        return ddg, configured_secondaries
+        return serpapi, [serper, ddg, tavily, brave]
+    elif pref in ("duckduckgo", "ddg"):
+        return ddg, [serper, tavily, brave, serpapi]
     else:  # "auto"
-        # Primary is DuckDuckGo; fallbacks are configured secondary APIs
-        return ddg, configured_secondaries
+        # Primary is DuckDuckGo; fallbacks are secondary providers (Serper first, then Tavily, Brave, SerpApi)
+        return ddg, [serper, tavily, brave, serpapi]
 
 
 class InstagramBusinessSearchProvider(SearchProviderBase):
@@ -862,6 +959,7 @@ class InstagramBusinessSearchProvider(SearchProviderBase):
         source_mode: str = "instagram_only",
         limit: int = 10,
         diagnostics: Optional[Dict[str, Any]] = None,
+        search_provider: Optional[str] = None,
         **kwargs
     ) -> List[Dict[str, Any]]:
         # Backward-compatibility for mock search signatures
@@ -886,13 +984,20 @@ class InstagramBusinessSearchProvider(SearchProviderBase):
                 "provider_status": "ok",
                 "provider_used": "DuckDuckGo",
                 "fallback_used": False,
+                "selected_provider": "",
+                "key_configured": False,
+                "provider_request_status": "",
+                "fallback_attempts": [],
             }
 
         loc_info = normalize_location_input(city_or_state)
         queries = generate_targeted_queries(niche, loc_info, keywords, source_mode)
 
-        primary_provider, fallback_providers = get_search_pipeline()
+        primary_provider, fallback_providers = get_search_pipeline(search_provider)
         diagnostics["provider_used"] = primary_provider.name
+        diagnostics["selected_provider"] = primary_provider.name
+        diagnostics["key_configured"] = bool(primary_provider.has_key_configured())
+        diagnostics["fallback_attempts"] = []
 
         raw_items = await primary_provider.search(
             queries=queries,
@@ -900,25 +1005,55 @@ class InstagramBusinessSearchProvider(SearchProviderBase):
             source_mode=source_mode,
             diagnostics=diagnostics
         )
+        primary_req_status = diagnostics.get("provider_request_status") or "HTTP 200 OK"
+        diagnostics["provider_request_status"] = primary_req_status
 
-        # Trigger fallback if primary provider returned 0 results and was rate-limited or errored
-        if len(raw_items) == 0 and fallback_providers:
+        # Trigger fallback if primary provider returned 0 results and failed (rate limited, error, bot challenge, or missing key)
+        should_fallback = (
+            len(raw_items) == 0
+            and fallback_providers
+            and (
+                diagnostics.get("provider_status") in ("rate_limited_202", "rate_limited_429", "unauthorized_401", "error", "timeout")
+                or not primary_provider.is_configured()
+            )
+        )
+
+        if should_fallback:
+            diagnostics["fallback_attempts"].append(
+                f"{primary_provider.name}: {primary_req_status} (0 results)"
+            )
             for fallback in fallback_providers:
                 if not fallback.is_configured():
+                    diagnostics["fallback_attempts"].append(
+                        f"{fallback.name}: Skipped (key not configured)"
+                    )
                     continue
+
                 logger.info(f"Primary provider returned 0 results. Triggering fallback to {fallback.name}")
+                diagnostics["fallback_attempts"].append(f"Attempting fallback to {fallback.name}...")
                 fallback_items = await fallback.search(
                     queries=queries,
                     limit=limit,
                     source_mode=source_mode,
                     diagnostics=diagnostics
                 )
+                fb_req_status = diagnostics.get("provider_request_status", "HTTP 200 OK")
                 if fallback_items:
                     raw_items = fallback_items
                     diagnostics["provider_used"] = fallback.name
+                    diagnostics["selected_provider"] = fallback.name
+                    diagnostics["key_configured"] = bool(fallback.has_key_configured())
                     diagnostics["fallback_used"] = True
                     diagnostics["provider_status"] = "ok"
+                    diagnostics["provider_request_status"] = fb_req_status
+                    diagnostics["fallback_attempts"].append(
+                        f"{fallback.name}: Success ({len(fallback_items)} raw results, {fb_req_status})"
+                    )
                     break
+                else:
+                    diagnostics["fallback_attempts"].append(
+                        f"{fallback.name}: {fb_req_status} (0 results)"
+                    )
 
         discovered_candidates = []
         seen_identifiers = set()
@@ -1025,7 +1160,8 @@ async def execute_lead_discovery(
     website_filter: str = "all",
     min_score: int = 0,
     exclude_crm: bool = False,
-    limit: int = 10
+    limit: int = 10,
+    search_provider: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Executes Instagram-first prospect discovery with structured diagnostics,
@@ -1052,6 +1188,10 @@ async def execute_lead_discovery(
         "provider_used": "DuckDuckGo",
         "provider_error_message": None,
         "fallback_used": False,
+        "selected_provider": "",
+        "key_configured": False,
+        "provider_request_status": "",
+        "fallback_attempts": [],
     }
 
     provider = InstagramBusinessSearchProvider()
@@ -1063,7 +1203,8 @@ async def execute_lead_discovery(
             keywords=clean_keywords,
             source_mode=source_mode,
             limit=limit,
-            diagnostics=diagnostics
+            diagnostics=diagnostics,
+            search_provider=search_provider
         )
     except TypeError:
         try:
@@ -1072,16 +1213,26 @@ async def execute_lead_discovery(
                 city_or_state=clean_city,
                 keywords=clean_keywords,
                 source_mode=source_mode,
-                limit=limit
+                limit=limit,
+                diagnostics=diagnostics
             )
         except TypeError:
-            # Fallback for legacy mock signatures
-            raw_candidates = await provider.search(
-                f"{clean_niche} {clean_keywords}".strip(),
-                state=clean_city,
-                industry=clean_niche,
-                limit=limit
-            )
+            try:
+                raw_candidates = await provider.search(
+                    niche=clean_niche,
+                    city_or_state=clean_city,
+                    keywords=clean_keywords,
+                    source_mode=source_mode,
+                    limit=limit
+                )
+            except TypeError:
+                # Fallback for legacy mock signatures
+                raw_candidates = await provider.search(
+                    f"{clean_niche} {clean_keywords}".strip(),
+                    state=clean_city,
+                    industry=clean_niche,
+                    limit=limit
+                )
 
     items = []
     now_iso = datetime.now().isoformat()
@@ -1163,7 +1314,7 @@ async def execute_lead_discovery(
             "reachable": lead_web_status != "broken_website",
             "status_code": 200 if lead_web_status != "broken_website" else 404,
             "discovered_at": now_iso,
-            "provider_source": diagnostics.get("provider_used") or provider.name,
+            "provider_source": diagnostics.get("selected_provider") or diagnostics.get("provider_used") or provider.name,
         }
         items.append(item)
 
@@ -1171,33 +1322,40 @@ async def execute_lead_discovery(
             break
 
     # Determine status & limitation notice
-    provider_name = diagnostics.get("provider_used") or provider.name
+    provider_name = diagnostics.get("selected_provider") or diagnostics.get("provider_used") or provider.name
     limitation_notice = None
 
     if len(items) == 0:
-        if diagnostics.get("provider_status") == "rate_limited_202":
+        req_status = diagnostics.get("provider_request_status", "")
+        if "Missing" in req_status or not diagnostics.get("key_configured", False) and provider_name != "DuckDuckGo":
+            limitation_notice = (
+                f"{provider_name} was selected as the search provider, but its API key is not configured. "
+                "Please configure SERPER_API_KEY in your environment variables, or switch to Auto / DuckDuckGo."
+            )
+        elif diagnostics.get("provider_status") == "rate_limited_202":
             limitation_notice = (
                 f"DuckDuckGo search provider challenged queries from this server IP (HTTP 202 Bot Challenge). "
                 "0 verified profiles could be retrieved. To enable reliable prospect discovery on cloud hosting, "
-                "configure a secondary search API key (SERPER_API_KEY, TAVILY_API_KEY, or BRAVE_SEARCH_API_KEY) in Settings."
+                "configure SERPER_API_KEY or select Google (Serper API)."
             )
         elif diagnostics.get("raw_results_count", 0) > 0 and diagnostics.get("valid_profiles_count", 0) == 0:
             rejs = diagnostics.get("rejected_counts", {})
             limitation_notice = (
-                f"Search provider returned {diagnostics['raw_results_count']} raw results, but all were rejected by validation "
+                f"Search provider ({provider_name}) returned {diagnostics['raw_results_count']} raw results, but all were rejected by validation "
                 f"({rejs.get('non_profile_path', 0)} non-profile paths/reels/popular pages, "
                 f"{rejs.get('aggregator_or_listicle', 0)} directories/listicles). "
                 "Try adjusting niche or location keywords."
             )
         elif diagnostics.get("provider_status") == "timeout":
             limitation_notice = (
-                f"Search provider timed out while querying '{clean_niche}' in '{display_location or 'selected region'}'. "
+                f"Search provider ({provider_name}) timed out while querying '{clean_niche}' in '{display_location or 'selected region'}'. "
                 "Please retry in a moment."
             )
         else:
             limitation_notice = (
                 f"No verified business profiles found for '{clean_niche}' in '{display_location or 'selected region'}'. "
-                f"{provider_name} returned 0 verified profiles. Try adjusting the niche or city keywords, or switch to All Public Sources."
+                f"{provider_name} returned 0 verified profiles ({req_status or 'HTTP 200 OK'}). "
+                "Try adjusting the niche or city keywords, or switch to All Public Sources."
             )
 
     return {

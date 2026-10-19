@@ -422,7 +422,8 @@ async def discover_public_leads(query_in: LeadDiscoveryQuery):
                 website_filter=query_in.website_filter or "all",
                 min_score=query_in.min_score or 0,
                 exclude_crm=bool(query_in.exclude_crm),
-                limit=limit
+                limit=limit,
+                search_provider=query_in.search_provider
             )
             return LeadDiscoveryResponse(**res)
         except Exception as e:

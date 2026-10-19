@@ -1937,6 +1937,162 @@ def test_regression_deduplication_and_empty_results(monkeypatch):
     assert data["diagnostics"]["duplicates_removed"] >= 2
 
 
+def test_serper_primary_provider_selection_and_diagnostics(monkeypatch):
+    """
+    Verifies that:
+    1. SEARCH_PROVIDER=serper selects Serper as the primary provider.
+    2. key_configured is True (boolean only) when SERPER_API_KEY is present, False when unset.
+    3. safe diagnostics show selected_provider, key_configured, provider_request_status, raw_results_count.
+    4. SERPER_API_KEY is never exposed in response.
+    """
+    import os
+    from backend.app.services.discovery_service import SerperSearchProvider, DuckDuckGoSearchProvider
+
+    secret_key = "secret_serper_test_token_999"
+    monkeypatch.setenv("SEARCH_PROVIDER", "serper")
+    monkeypatch.setenv("SERPER_API_KEY", secret_key)
+
+    mock_items = [
+        {
+            "raw_title": "Boutique Serper (@boutique_serper) • Instagram photos and videos",
+            "target_url": "https://www.instagram.com/boutique_serper/",
+            "snippet": "Clothing boutique in Kochi, Kerala. Call: 9876543210"
+        }
+    ]
+
+    ddg_called = []
+    async def mock_ddg_search(self, queries, limit, source_mode, diagnostics):
+        ddg_called.append(True)
+        return []
+
+    serper_calls = []
+    async def mock_serper_search(self, queries, limit, source_mode, diagnostics):
+        serper_calls.append(queries)
+        diagnostics["queries_executed"].extend(queries)
+        diagnostics["raw_results_count"] += len(mock_items)
+        diagnostics["provider_request_status"] = "HTTP 200 OK"
+        return mock_items
+
+    monkeypatch.setattr(DuckDuckGoSearchProvider, "search", mock_ddg_search)
+    monkeypatch.setattr(SerperSearchProvider, "search", mock_serper_search)
+
+    resp = client.post("/api/leads/discover", json={
+        "niche": "clothing",
+        "city_or_state": "kochi",
+        "source_mode": "instagram_only"
+    })
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(serper_calls) == 1
+    assert len(ddg_called) == 0  # DuckDuckGo should NOT be called since Serper was primary
+
+    diag = data["diagnostics"]
+    assert diag["selected_provider"] == "Google (Serper API)"
+    assert diag["key_configured"] is True  # Boolean only!
+    assert isinstance(diag["key_configured"], bool)
+    assert diag["provider_request_status"] == "HTTP 200 OK"
+    assert diag["raw_results_count"] == 1
+    assert data["total_found"] == 1
+    assert data["results"][0]["instagram_username"] == "boutique_serper"
+
+    # Verify secret key is never leaked
+    resp_text = resp.text
+    assert secret_key not in resp_text
+
+
+def test_auto_provider_ddg_202_fallback_to_serper_and_diagnostics(monkeypatch):
+    """
+    Verifies that:
+    1. In SEARCH_PROVIDER=auto, DuckDuckGo is primary.
+    2. On HTTP 202 bot challenge, DuckDuckGo is not retried indefinitely.
+    3. Provider automatically falls back to Serper when key is configured.
+    4. Diagnostics report fallback_attempts and updated provider status safely.
+    """
+    from backend.app.services.discovery_service import DuckDuckGoSearchProvider, SerperSearchProvider
+
+    monkeypatch.setenv("SEARCH_PROVIDER", "auto")
+    monkeypatch.setenv("SERPER_API_KEY", "serper_live_mock_key")
+
+    ddg_query_count = []
+    async def mock_ddg_challenge(self, queries, limit, source_mode, diagnostics):
+        for q in queries:
+            ddg_query_count.append(q)
+            diagnostics["queries_executed"].append(q)
+            diagnostics["rate_limits"] += 1
+            diagnostics["provider_status"] = "rate_limited_202"
+            diagnostics["provider_request_status"] = "HTTP 202 Bot Challenge"
+            diagnostics["provider_error_message"] = "DuckDuckGo returned HTTP 202 Bot Challenge from this server IP."
+            break  # Break immediately on 202 (never retry indefinitely)
+        return []
+
+    mock_fallback_items = [
+        {
+            "raw_title": "Café Kochi Roastery (@cafekochi_roastery)",
+            "target_url": "https://www.instagram.com/cafekochi_roastery/",
+            "snippet": "Artisanal coffee and roastery in Kochi, Kerala. WhatsApp orders."
+        }
+    ]
+
+    serper_query_count = []
+    async def mock_serper_search(self, queries, limit, source_mode, diagnostics):
+        serper_query_count.append(queries)
+        diagnostics["queries_executed"].extend(queries)
+        diagnostics["raw_results_count"] += len(mock_fallback_items)
+        diagnostics["provider_request_status"] = "HTTP 200 OK"
+        return mock_fallback_items
+
+    monkeypatch.setattr(DuckDuckGoSearchProvider, "search", mock_ddg_challenge)
+    monkeypatch.setattr(SerperSearchProvider, "search", mock_serper_search)
+
+    resp = client.post("/api/leads/discover", json={
+        "niche": "cafe",
+        "city_or_state": "kochi",
+        "source_mode": "instagram_only"
+    })
+
+    assert resp.status_code == 200
+    data = resp.json()
+
+    # DuckDuckGo broke immediately on first query
+    assert len(ddg_query_count) == 1
+    # Serper was called as fallback
+    assert len(serper_query_count) == 1
+
+    diag = data["diagnostics"]
+    assert diag["fallback_used"] is True
+    assert diag["selected_provider"] == "Google (Serper API)"
+    assert diag["key_configured"] is True
+    assert isinstance(diag["key_configured"], bool)
+    assert diag["provider_request_status"] == "HTTP 200 OK"
+    assert diag["raw_results_count"] == 1
+    assert any("HTTP 202" in attempt for attempt in diag["fallback_attempts"])
+    assert any("Google (Serper API): Success" in attempt for attempt in diag["fallback_attempts"])
+
+    assert data["total_found"] == 1
+    assert data["results"][0]["instagram_username"] == "cafekochi_roastery"
+
+
+def test_api_key_security_never_logged_or_exposed(monkeypatch):
+    """
+    Verifies that key_configured is strictly boolean and API keys are never exposed in JSON output.
+    """
+    super_secret_key = "serper_super_secret_value_xyz789"
+    monkeypatch.setenv("SEARCH_PROVIDER", "serper")
+    monkeypatch.setenv("SERPER_API_KEY", super_secret_key)
+
+    resp = client.post("/api/leads/discover", json={
+        "niche": "bakeries",
+        "city_or_state": "kochi",
+        "search_provider": "serper"
+    })
+    assert resp.status_code == 200
+    # Must never contain super_secret_key anywhere in response body
+    assert super_secret_key not in resp.text
+    data = resp.json()
+    assert isinstance(data["diagnostics"]["key_configured"], bool)
+
+
 
 
 

@@ -188,6 +188,7 @@ class LeadDiscoveryQuery(BaseModel):
     min_score: Optional[int] = 0
     limit: Optional[int] = 10
     exclude_crm: Optional[bool] = False
+    search_provider: Optional[str] = None  # None (auto), 'serper', 'duckduckgo', 'tavily', 'brave', 'serpapi'
 
 class LeadDiscoveryItem(BaseModel):
     business_name: str
@@ -240,6 +241,10 @@ class DiscoveryDiagnostics(BaseModel):
     provider_used: str = ""
     provider_error_message: Optional[str] = None
     fallback_used: bool = False
+    selected_provider: str = ""
+    key_configured: bool = False
+    provider_request_status: str = ""
+    fallback_attempts: List[str] = []
 
 class LeadDiscoveryResponse(BaseModel):
     status: str
