@@ -46,7 +46,7 @@ services:
       # Search Provider Configuration
       # When primary DuckDuckGo search is rate-limited on datacenter IPs, secondary APIs can be configured:
       - key: SEARCH_PROVIDER
-        value: "auto"
+        value: "serper"
       - key: SERPER_API_KEY
         sync: false
       - key: TAVILY_API_KEY

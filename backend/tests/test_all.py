@@ -2093,8 +2093,49 @@ def test_api_key_security_never_logged_or_exposed(monkeypatch):
     assert isinstance(data["diagnostics"]["key_configured"], bool)
 
 
+def test_serper_search_num_payload_capped_at_ten(monkeypatch):
+    """
+    Verifies SerperSearchProvider caps 'num' parameter at 10 to satisfy Serper API constraints,
+    preventing HTTP 400 Bad Request errors when limit >= 10.
+    """
+    import asyncio
+    import httpx
+    from backend.app.services.discovery_service import SerperSearchProvider
 
+    provider = SerperSearchProvider()
+    monkeypatch.setenv("SERPER_API_KEY", "test_key_12345")
 
+    captured_payloads = []
 
+    class MockResponse:
+        status_code = 200
+        def json(self):
+            return {
+                "organic": [
+                    {"title": "Test Title", "link": "https://www.instagram.com/test_brand/", "snippet": "Test snippet"}
+                ]
+            }
 
+    async def mock_post(self, url, json=None, headers=None, **kwargs):
+        captured_payloads.append(json)
+        return MockResponse()
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", mock_post)
+
+    diag = {
+        "queries_executed": [],
+        "raw_results_count": 0,
+        "provider_errors": 0,
+        "rate_limits": 0,
+        "timeouts": 0,
+        "provider_status": "ok",
+        "provider_request_status": ""
+    }
+
+    results = asyncio.run(provider.search(["site:instagram.com boutique kochi"], limit=20, source_mode="instagram_only", diagnostics=diag))
+    assert len(captured_payloads) >= 1
+    assert captured_payloads[0]["num"] <= 10
+    assert captured_payloads[0]["num"] == 10
+    assert diag["provider_request_status"] == "HTTP 200 OK"
+    assert len(results) == 1
 

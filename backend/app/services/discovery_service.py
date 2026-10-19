@@ -622,13 +622,15 @@ class SerperSearchProvider(SearchProviderBase):
         timeout = float(settings.SEARCH_TIMEOUT_SECONDS or 14.0)
 
         async with httpx.AsyncClient(timeout=timeout) as client:
-            for q in queries[:2]:
+            for q in queries[:3]:
                 diagnostics["queries_executed"].append(f"[Serper] {q}")
                 try:
-                    payload = {"q": q, "gl": "in", "num": limit * 2}
+                    num_results = min(10, max(1, limit))
+                    payload = {"q": q, "gl": "in", "num": num_results}
                     resp = await client.post("https://google.serper.dev/search", json=payload, headers=headers)
                     if resp.status_code == 200:
                         diagnostics["provider_request_status"] = "HTTP 200 OK"
+                        diagnostics["provider_status"] = "ok"
                         data = resp.json()
                         for item in data.get("organic", []):
                             raw_results.append({
@@ -654,10 +656,11 @@ class SerperSearchProvider(SearchProviderBase):
                         break
                     else:
                         diagnostics["provider_errors"] += 1
+                        diagnostics["provider_status"] = "error"
                         diagnostics["provider_request_status"] = f"HTTP {resp.status_code}"
                         continue
 
-                    if len(raw_results) >= limit * 2:
+                    if len(raw_results) >= max(limit, 10):
                         break
 
                 except httpx.TimeoutException:
@@ -1031,6 +1034,10 @@ class InstagramBusinessSearchProvider(SearchProviderBase):
 
                 logger.info(f"Primary provider returned 0 results. Triggering fallback to {fallback.name}")
                 diagnostics["fallback_attempts"].append(f"Attempting fallback to {fallback.name}...")
+                diagnostics["provider_used"] = fallback.name
+                diagnostics["selected_provider"] = fallback.name
+                diagnostics["key_configured"] = bool(fallback.has_key_configured())
+                diagnostics["fallback_used"] = True
                 fallback_items = await fallback.search(
                     queries=queries,
                     limit=limit,

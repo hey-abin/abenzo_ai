@@ -141,7 +141,7 @@ function LeadsContent() {
     min_score: 0,
     limit: 10,
     exclude_crm: true,
-    search_provider: "auto"
+    search_provider: "serper"
   });
   const [discovering, setDiscovering] = useState(false);
   const [discoveryResults, setDiscoveryResults] = useState([]);
@@ -1224,8 +1224,8 @@ function LeadsContent() {
                       onChange={(e) => setDiscoveryQuery({ ...discoveryQuery, search_provider: e.target.value })}
                       className="rounded border border-zinc-200 bg-white p-1 text-[11px] dark:border-zinc-700 dark:bg-zinc-800"
                     >
-                      <option value="auto">Auto (DDG + Serper Fallback)</option>
                       <option value="serper">Google (Serper API)</option>
+                      <option value="auto">Auto (DDG + Serper Fallback)</option>
                       <option value="duckduckgo">DuckDuckGo (Free)</option>
                     </select>
                   </div>
