@@ -15,6 +15,7 @@ import {
   Plus
 } from "lucide-react";
 import { fetchMetrics } from "@/lib/api";
+import ProspectingCampaignDashboard from "@/components/ProspectingCampaignDashboard";
 
 export default function OverviewPage() {
   const [metrics, setMetrics] = useState({
@@ -73,6 +74,9 @@ export default function OverviewPage() {
           </Link>
         </div>
       </div>
+
+      {/* Autonomous Prospecting Campaign Dashboard */}
+      <ProspectingCampaignDashboard onLeadUpdated={loadData} />
 
       {/* Metrics Grid */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">

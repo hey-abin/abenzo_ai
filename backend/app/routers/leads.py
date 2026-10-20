@@ -1,9 +1,11 @@
 import json
 import csv
 import io
+import uuid
 from datetime import datetime
 from fastapi import APIRouter, HTTPException, Query, UploadFile, File, Response
 from typing import Optional, List
+from backend.app.config import settings
 from backend.app.database import get_db
 from backend.app.schemas import (
     LeadCreate,
@@ -11,11 +13,14 @@ from backend.app.schemas import (
     LeadResponse,
     LeadDiscoveryQuery,
     LeadDiscoveryResponse,
-    ImportDiscoveredRequest
+    ImportDiscoveredRequest,
+    LeadSendMessageRequest,
+    LeadSendMessageResponse,
+    LeadMessagingStatusResponse
 )
 from backend.app.services.website_checker import check_website
 from backend.app.services.ollama_service import qualify_lead_with_ai
-from backend.app.services.discovery_service import check_duplicate_lead, execute_lead_discovery
+from backend.app.services.discovery_service import check_duplicate_lead, execute_lead_discovery, evaluate_digital_opportunity
 
 router = APIRouter(prefix="/leads", tags=["leads"])
 
@@ -34,10 +39,13 @@ def row_to_lead(row) -> dict:
     for key in (
         "city", "instagram_handle", "contact_name", "public_phone", "public_email",
         "suggested_service", "observed_problems", "project_timeline", "budget",
-        "consent_source", "follow_up_date", "outreach_action_at"
+        "consent_source", "follow_up_date", "outreach_action_at",
+        "source_media_id", "source_media_url", "source_caption", "discovery_hashtag"
     ):
         if d.get(key) is None:
             d[key] = ""
+    if "campaign_id" not in d:
+        d["campaign_id"] = None
     return d
 
 @router.get("/metrics")
@@ -554,3 +562,396 @@ async def import_discovered_leads(payload: ImportDiscoveredRequest):
         "skipped_count": skipped,
         "leads": imported_leads
     }
+
+
+@router.get("/{lead_id}/messaging-status", response_model=LeadMessagingStatusResponse)
+def get_lead_messaging_status(lead_id: int):
+    """
+    Checks Meta messaging eligibility for a specific CRM lead under Meta's official Platform Policy:
+    - Verifies whether an active inbound conversation thread exists.
+    - Cold first-contact DMs are strictly prohibited by Meta Graph API.
+    - If eligible, provides conversation context and permits dashboard sending.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM leads WHERE id = ?", (lead_id,))
+        lead_row = cursor.fetchone()
+        if not lead_row:
+            raise HTTPException(status_code=404, detail="Lead not found")
+        lead = dict(lead_row)
+
+        conv_id = lead.get("conversation_id")
+        conv = None
+        if conv_id:
+            cursor.execute("SELECT * FROM conversations WHERE id = ?", (conv_id,))
+            conv = cursor.fetchone()
+
+        if not conv:
+            cursor.execute("SELECT * FROM conversations WHERE lead_id = ? ORDER BY id DESC LIMIT 1", (lead_id,))
+            conv = cursor.fetchone()
+
+        # Fallback search by handle or URL if conv_id was not explicitly linked yet
+        if not conv:
+            handle = (lead.get("instagram_handle") or "").strip().lstrip("@")
+            if not handle and lead.get("instagram_url"):
+                from backend.app.services.discovery_service import extract_instagram_handle
+                handle = extract_instagram_handle(lead["instagram_url"])
+
+            if handle:
+                cursor.execute("""
+                    SELECT * FROM conversations
+                    WHERE external_thread_id = ? OR recipient_id = ? OR contact_display_name = ?
+                    ORDER BY id DESC LIMIT 1
+                """, (handle, handle, handle))
+                conv = cursor.fetchone()
+
+        if conv:
+            conv_id = conv["id"]
+            cursor.execute("UPDATE leads SET conversation_id = ? WHERE id = ?", (conv_id, lead_id))
+            cursor.execute("UPDATE conversations SET lead_id = ? WHERE id = ?", (lead_id, conv_id))
+            conn.commit()
+
+        meta_token_set = bool(settings.effective_instagram_token)
+
+        if not conv:
+            return LeadMessagingStatusResponse(
+                eligible=False,
+                can_send=False,
+                conversation_id=None,
+                recipient_id="",
+                platform="manual",
+                within_messaging_window=False,
+                meta_connected=meta_token_set,
+                reason="First-contact restriction: This prospect has not initiated an inbound conversation with @abenzo.co.in. Under Meta's Platform Policy, businesses cannot initiate unsolicited cold outbound DMs via API. Please use Copy Message and Open Profile to conduct authorized manual outreach directly on Instagram.",
+                suggested_action="manual_outreach",
+                outreach_status=lead.get("outreach_status", "new"),
+                draft_message=lead.get("personalized_dm", "")
+            )
+
+        conv_dict = dict(conv)
+        platform = conv_dict.get("platform", "manual")
+        recipient_id = conv_dict.get("recipient_id") or conv_dict.get("external_thread_id") or ""
+        last_msg_at = conv_dict.get("last_message_at")
+
+        within_window = True
+        if platform == "instagram" and last_msg_at:
+            try:
+                last_dt = datetime.fromisoformat(last_msg_at.replace("Z", "+00:00"))
+                if last_dt.tzinfo is not None:
+                    last_dt = last_dt.replace(tzinfo=None)
+                diff_hours = (datetime.now() - last_dt).total_seconds() / 3600
+                if diff_hours > 24:
+                    within_window = False
+            except Exception:
+                within_window = True
+
+        can_send = True
+        reason = "Eligible: An active conversation exists. You may edit and send this message directly from the dashboard."
+        if platform == "instagram" and not within_window:
+            can_send = False
+            reason = "Messaging window expired: Meta allows outbound messages within 24 hours of the user's last message. The 24-hour window for this conversation has closed."
+        elif platform == "instagram" and not meta_token_set:
+            can_send = False
+            reason = "Instagram API token is not configured in backend environment."
+
+        return LeadMessagingStatusResponse(
+            eligible=True,
+            can_send=can_send,
+            conversation_id=conv_id,
+            recipient_id=recipient_id,
+            platform=platform,
+            within_messaging_window=within_window,
+            meta_connected=meta_token_set,
+            reason=reason,
+            suggested_action="dashboard_send" if can_send else "manual_outreach",
+            outreach_status=lead.get("outreach_status", "new"),
+            draft_message=lead.get("personalized_dm", "")
+        )
+
+
+@router.post("/{lead_id}/send-message", response_model=LeadSendMessageResponse)
+async def send_lead_message(lead_id: int, payload: LeadSendMessageRequest):
+    """
+    Dispatches a message draft to an eligible lead from the dashboard:
+    - Enforces Meta's Platform Policy: rejects cold first-contact DMs with clear guidance.
+    - Prevents duplicate sends on repeated clicks.
+    - Records outbound message in conversation history and updates CRM outreach_status to 'contacted' only upon confirmed delivery.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM leads WHERE id = ?", (lead_id,))
+        lead_row = cursor.fetchone()
+        if not lead_row:
+            raise HTTPException(status_code=404, detail="Lead not found")
+        lead = dict(lead_row)
+
+        conv_id = lead.get("conversation_id")
+        conv = None
+        if conv_id:
+            cursor.execute("SELECT * FROM conversations WHERE id = ?", (conv_id,))
+            conv = cursor.fetchone()
+
+        if not conv:
+            cursor.execute("SELECT * FROM conversations WHERE lead_id = ? ORDER BY id DESC LIMIT 1", (lead_id,))
+            conv = cursor.fetchone()
+
+        if not conv:
+            handle = (lead.get("instagram_handle") or "").strip().lstrip("@")
+            if not handle and lead.get("instagram_url"):
+                from backend.app.services.discovery_service import extract_instagram_handle
+                handle = extract_instagram_handle(lead["instagram_url"])
+
+            if handle:
+                cursor.execute("""
+                    SELECT * FROM conversations
+                    WHERE external_thread_id = ? OR recipient_id = ? OR contact_display_name = ?
+                    ORDER BY id DESC LIMIT 1
+                """, (handle, handle, handle))
+                conv = cursor.fetchone()
+
+        if conv:
+            conv_id = conv["id"]
+            cursor.execute("UPDATE leads SET conversation_id = ? WHERE id = ?", (conv_id, lead_id))
+            cursor.execute("UPDATE conversations SET lead_id = ? WHERE id = ?", (lead_id, conv_id))
+            conn.commit()
+
+        if not conv:
+            raise HTTPException(
+                status_code=403,
+                detail="Unauthorized: Under Meta's official Platform Policy, automated or dashboard cold DMs cannot be sent to Instagram users who have never messaged your business. Use Copy Message and Open Profile to conduct authorized manual outreach on Instagram."
+            )
+
+        conv_dict = dict(conv)
+        platform = conv_dict.get("platform", "manual")
+        recipient_id = conv_dict.get("recipient_id") or conv_dict.get("external_thread_id") or ""
+
+        text_to_send = (payload.message_text or lead.get("personalized_dm") or "").strip()
+        if not text_to_send:
+            raise HTTPException(status_code=400, detail="Message text cannot be empty.")
+
+        # Duplicate send prevention: check if identical message was sent in last 60 seconds
+        cursor.execute("""
+            SELECT id, delivery_status, created_at FROM conversation_events
+            WHERE conversation_id = ? AND direction = 'outbound' AND message_text = ?
+            ORDER BY id DESC LIMIT 1
+        """, (conv_id, text_to_send))
+        recent_event = cursor.fetchone()
+        if recent_event and recent_event["delivery_status"] in ("sending", "sent"):
+            is_recent_dup = False
+            try:
+                ev_time = datetime.fromisoformat(recent_event["created_at"])
+                if (datetime.now() - ev_time).total_seconds() < 60:
+                    is_recent_dup = True
+            except Exception:
+                is_recent_dup = True
+
+            if is_recent_dup:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Duplicate message send prevented: An identical message is currently in-flight or was sent within the last minute."
+                )
+
+        now_str = datetime.now().isoformat()
+
+        # Handle sample / manual test conversations
+        if platform in ("instagram_sample", "manual") or recipient_id.startswith("sample_") or recipient_id.startswith("manual_"):
+            cursor.execute("""
+                INSERT INTO conversation_events (
+                    conversation_id, external_event_id, event_type, direction,
+                    message_text, approved_text, delivery_status, meta_message_id, sent_at, created_at
+                ) VALUES (?, ?, 'dm', 'outbound', ?, ?, 'sent', 'sample_dashboard_sent', ?, ?)
+            """, (conv_id, f"sample_lead_{uuid.uuid4().hex[:10]}", text_to_send, text_to_send, now_str, now_str))
+            event_id = cursor.lastrowid
+
+            cursor.execute("""
+                UPDATE leads SET
+                    outreach_status = 'contacted',
+                    outreach_action_at = ?,
+                    updated_at = ?
+                WHERE id = ?
+            """, (now_str, now_str, lead_id))
+
+            cursor.execute("""
+                UPDATE conversations SET
+                    last_message_at = ?,
+                    needs_human = 0,
+                    updated_at = ?
+                WHERE id = ?
+            """, (now_str, now_str, conv_id))
+            conn.commit()
+
+            return LeadSendMessageResponse(
+                status="sent",
+                delivery_status="sent",
+                meta_message_id="sample_dashboard_sent",
+                event_id=event_id,
+                conversation_id=conv_id,
+                lead_id=lead_id,
+                sent_at=now_str,
+                error_details=""
+            )
+
+        # Real Instagram conversation verification
+        if platform != "instagram":
+            raise HTTPException(
+                status_code=400,
+                detail=f"Outbound delivery only supported for Instagram conversations (current: '{platform}')."
+            )
+
+        if not recipient_id or recipient_id in ("29266079986333250", "17841428389805643"):
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid recipient ID: Inbound conversation does not have a verified Instagram user ID."
+            )
+
+        # Create outbound event in 'sending' state
+        cursor.execute("""
+            INSERT INTO conversation_events (
+                conversation_id, external_event_id, event_type, direction,
+                message_text, approved_text, delivery_status, created_at
+            ) VALUES (?, ?, 'dm', 'outbound', ?, ?, 'sending', ?)
+        """, (conv_id, f"out_lead_{uuid.uuid4().hex[:12]}", text_to_send, text_to_send, now_str))
+        event_id = cursor.lastrowid
+        conn.commit()
+
+    # Dispatch via Meta Graph API
+    from backend.app.routers.meta import dispatch_instagram_dm
+    dispatch_res = await dispatch_instagram_dm(recipient_id, text_to_send)
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        now_str = datetime.now().isoformat()
+
+        if dispatch_res.get("success"):
+            meta_mid = dispatch_res.get("meta_message_id") or dispatch_res.get("message_id") or ""
+            cursor.execute("""
+                UPDATE conversation_events SET
+                    delivery_status = 'sent',
+                    meta_message_id = ?,
+                    sent_at = ?,
+                    error_details = ''
+                WHERE id = ?
+            """, (meta_mid, now_str, event_id))
+
+            cursor.execute("""
+                UPDATE leads SET
+                    outreach_status = 'contacted',
+                    outreach_action_at = ?,
+                    updated_at = ?
+                WHERE id = ?
+            """, (now_str, now_str, lead_id))
+
+            cursor.execute("""
+                UPDATE conversations SET
+                    last_message_at = ?,
+                    needs_human = 0,
+                    updated_at = ?
+                WHERE id = ?
+            """, (now_str, now_str, conv_id))
+            conn.commit()
+
+            return LeadSendMessageResponse(
+                status="sent",
+                delivery_status="sent",
+                meta_message_id=meta_mid,
+                event_id=event_id,
+                conversation_id=conv_id,
+                lead_id=lead_id,
+                sent_at=now_str,
+                error_details=""
+            )
+        else:
+            err_details = dispatch_res.get("error_details", "Meta Graph API dispatch failed.")
+            cursor.execute("""
+                UPDATE conversation_events SET
+                    delivery_status = 'failed',
+                    error_details = ?
+                WHERE id = ?
+            """, (err_details, event_id))
+            conn.commit()
+
+            raise HTTPException(
+                status_code=502,
+                detail=f"Message delivery failed: {err_details}"
+            )
+
+
+@router.post("/{lead_id}/recalculate-qualification", response_model=LeadResponse)
+async def recalculate_lead_qualification(lead_id: int):
+    """
+    Safely re-evaluates website verification and opportunity scoring for an existing lead:
+    - Never overwrites custom operator notes or customer data.
+    - Accurately checks website availability, SSL, and features if website_url is present.
+    - Removes arbitrary no-website bonuses in favor of evidence-based scoring.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM leads WHERE id = ?", (lead_id,))
+        row = cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Lead not found")
+        lead = row_to_lead(row)
+
+    web_url = lead.get("website_url", "").strip()
+    evidence = lead.get("evidence_json", {})
+    web_check_data = {}
+
+    if web_url:
+        check_res = await check_website(web_url)
+        web_check_data = check_res.model_dump()
+        status = check_res.status
+    else:
+        # Check if bio snippet explicitly indicates direct DM ordering
+        snippet = lead.get("source_caption", "") or lead.get("business_summary", "")
+        if any(w in snippet.lower() for w in ["dm to order", "order via dm", "no website"]):
+            status = "no_website"
+        else:
+            status = "uncertain"
+
+    # Evaluate digital opportunity
+    opp_data = evaluate_digital_opportunity(
+        business_name=lead["business_name"],
+        niche=lead.get("industry", "Local Business"),
+        city=lead.get("city", ""),
+        website_url=web_url,
+        instagram_handle=lead.get("instagram_handle", ""),
+        snippet=lead.get("source_caption", "") or lead.get("business_summary", ""),
+        contacts={
+            "phones": [lead["public_phone"]] if lead.get("public_phone") else [],
+            "emails": [lead["public_email"]] if lead.get("public_email") else [],
+            "external_links": [web_url] if web_url else []
+        }
+    )
+
+    evidence["website_check"] = web_check_data
+    evidence["recalculated_at"] = datetime.now().isoformat()
+    now = datetime.now().isoformat()
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE leads SET
+                website_status = ?,
+                lead_score = ?,
+                observed_problems = ?,
+                opportunity = ?,
+                suggested_service = ?,
+                score_breakdown_json = ?,
+                evidence_json = ?,
+                updated_at = ?
+            WHERE id = ?
+        """, (
+            opp_data["website_status"],
+            opp_data["lead_score"],
+            opp_data["observed_problems"],
+            opp_data["opportunity"],
+            opp_data["suggested_service"],
+            json.dumps(opp_data["score_breakdown"]),
+            json.dumps(evidence),
+            now,
+            lead_id
+        ))
+        conn.commit()
+
+        cursor.execute("SELECT * FROM leads WHERE id = ?", (lead_id,))
+        return row_to_lead(cursor.fetchone())

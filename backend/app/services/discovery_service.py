@@ -298,14 +298,51 @@ def extract_contacts_and_links(text: str) -> Dict[str, Any]:
         if clean_e not in contacts["emails"]:
             contacts["emails"].append(clean_e)
 
-    urls = re.findall(r"https?://[^\s<>\"']+", text)
-    for u in urls:
-        u_clean = u.rstrip(".,;)")
+    # 1. Standard http(s) URLs
+    raw_urls = re.findall(r"https?://[^\s<>\"']+", text)
+
+    # 2. URLs starting with www. (e.g. www.myboutique.in, www.brand.com)
+    www_urls = re.findall(r"\bwww\.[a-zA-Z0-9\-]+(?:\.[a-zA-Z0-9\-]+)+(?:/[^\s<>\"']*)?", text)
+    for w in www_urls:
+        raw_urls.append(f"https://{w}")
+
+    # 3. Domain links without protocol in bio/snippet (common in Instagram bios: mybrand.in, shop.co.in, label.store)
+    bio_domains = re.findall(
+        r"(?<![@a-zA-Z0-9\-\.])([a-zA-Z0-9][-a-zA-Z0-9]*\.(?:in|co\.in|com|org|net|store|shop|online|co|app|io|tech|me|biz)(?:/[^\s<>\"'()]*[^\s<>\"'(),.;:])?)",
+        text,
+        flags=re.IGNORECASE
+    )
+    for d in bio_domains:
+        d_clean = d.strip().rstrip(".,;):\"'")
+        if not d_clean.startswith("http"):
+            raw_urls.append(f"https://{d_clean}")
+
+    for u in raw_urls:
+        u_clean = u.rstrip(".,;):\"'")
         root = extract_root_domain(u_clean)
-        if root and root not in AGGREGATOR_LISTICLE_DOMAINS and "instagram.com" not in root:
-            contacts["external_links"].append(u_clean)
+        if root and root not in AGGREGATOR_LISTICLE_DOMAINS and "instagram.com" not in root and "facebook.com" not in root:
+            if u_clean not in contacts["external_links"]:
+                contacts["external_links"].append(u_clean)
 
     return contacts
+
+
+def pick_best_website_url(external_links: List[str]) -> str:
+    """
+    Selects the most suitable standalone website URL from external links,
+    prioritizing custom branded domains over linktree / WhatsApp direct links.
+    """
+    if not external_links:
+        return ""
+
+    AGGREGATOR_SERVICES = ("wa.me", "whatsapp.com", "linktr.ee", "bio.link", "campsite.bio", "taplink.cc", "beacons.ai")
+    for link in external_links:
+        root = extract_root_domain(link).lower()
+        if not any(agg in root for agg in AGGREGATOR_SERVICES):
+            return link
+
+    # If only link aggregators or WhatsApp links exist, return the first one
+    return external_links[0]
 
 
 def check_duplicate_lead(cursor, business_name: str, website_url: str = "", instagram_url: str = "") -> Optional[Dict[str, Any]]:
@@ -313,7 +350,7 @@ def check_duplicate_lead(cursor, business_name: str, website_url: str = "", inst
     norm_ig = extract_instagram_handle(instagram_url)
     norm_name = business_name.strip().lower()
 
-    GENERIC_DOMAINS = {"linktr.ee", "bio.link", "wa.me", "api.whatsapp.com", "instagram.com", "facebook.com"}
+    GENERIC_DOMAINS = {"linktr.ee", "bio.link", "wa.me", "api.whatsapp.com", "instagram.com", "facebook.com", "taplink.cc"}
 
     if norm_ig:
         cursor.execute("SELECT id, business_name, instagram_url FROM leads")
@@ -357,33 +394,58 @@ def evaluate_digital_opportunity(
     web_lower = website_url.lower() if website_url else ""
     snip_lower = snippet.lower()
 
-    is_linktree_or_wa = any(x in web_lower for x in ["wa.me", "whatsapp.com", "linktr.ee", "bio.link"]) or not website_url
+    # Distinguish third-party link aggregators vs standalone branded websites
+    is_linktree_or_wa = any(x in web_lower for x in ["wa.me", "whatsapp.com", "linktr.ee", "bio.link", "taplink.cc"])
 
-    if is_linktree_or_wa or not website_url:
-        website_status = "no_website"
-        observed_problems = "Operating on Instagram without a standalone branded website; taking customer orders or inquiries manually via WhatsApp/DM."
-        opportunity = "Needs high-conversion e-commerce storefront or product catalog with direct WhatsApp ordering."
-        suggested_service = "E-Commerce & WhatsApp Ordering Storefront (₹30,000+)"
-        score += 25
-        breakdown["no_website_opportunity"] = 25
-        reasons.append("No standalone website (+25 pts: Prime customer for Abenzo web development)")
-    else:
-        if "error" in snip_lower or "404" in snip_lower or "domain expired" in snip_lower:
+    if website_url and not is_linktree_or_wa:
+        if any(err in snip_lower for err in ["error", "404", "domain expired", "server error", "connection refused", "inactive domain"]):
             website_status = "broken_website"
-            observed_problems = "Bio or listed website link appears unreachable or returns an error."
-            opportunity = "Needs immediate website rebuild and reliable modern hosting to stop losing customer traffic."
-            suggested_service = "Website Rebuild & Speed Optimization"
-            score += 30
-            breakdown["broken_website_opportunity"] = 30
-            reasons.append("Broken/unreachable website (+30 pts: High urgency client fix)")
+            observed_problems = f"Bio link ({website_url}) appears unreachable or returns an error based on public records."
+            opportunity = "Needs urgent website rebuild, SSL setup, and reliable modern cloud hosting."
+            suggested_service = "Website Rebuild & Hosting Migration"
+            score += 25
+            breakdown["broken_website_opportunity"] = 25
+            reasons.append("Broken/unreachable website (+25 pts: High-urgency rebuild opportunity)")
         else:
             website_status = "has_website"
-            observed_problems = "Has basic website presence; potential opportunity for mobile optimization, redesign, or conversion funnel."
-            opportunity = "Improve mobile page speed, modern redesign, and direct conversion capture."
+            observed_problems = f"Has active website at {website_url}; potential opportunity for mobile optimization, redesign, or conversion funnel."
+            opportunity = "Improve mobile page speed, modern UX redesign, and lead capture funnels."
             suggested_service = "Website Redesign & Conversion Optimization"
             score += 10
             breakdown["existing_website_opportunity"] = 10
             reasons.append("Existing website redesign opportunity (+10 pts)")
+    elif is_linktree_or_wa:
+        website_status = "no_website"
+        observed_problems = "Operating on Instagram using a link aggregator / direct WhatsApp link rather than a dedicated branded web storefront."
+        opportunity = "Needs high-conversion e-commerce storefront or product catalog with direct WhatsApp ordering."
+        suggested_service = "E-Commerce & WhatsApp Ordering Storefront (₹30,000+)"
+        score += 20
+        breakdown["ecom_storefront_opportunity"] = 20
+        reasons.append("Uses third-party aggregator / WhatsApp ordering without standalone branded storefront (+20 pts)")
+    elif not website_url and not contacts.get("external_links"):
+        website_status = "no_website"
+        observed_problems = "No official website found in Instagram bio; business relies on direct WhatsApp/phone inquiries or Instagram DMs for orders."
+        opportunity = "Needs dedicated website or high-conversion e-commerce storefront with direct WhatsApp ordering."
+        suggested_service = "E-Commerce & WhatsApp Ordering Storefront (₹30,000+)"
+        score += 20
+        breakdown["no_website_opportunity"] = 20
+        reasons.append("No website detected in profile (+20 pts: Prime digital storefront opportunity)")
+    elif any(phrase in snip_lower for phrase in ["no website", "dm to order", "orders in dm", "dm for orders", "dm for price", "order via dm", "order via whatsapp", "orders via whatsapp"]):
+        website_status = "no_website"
+        observed_problems = "Profile explicitly directs customers to order via Instagram DMs/WhatsApp without a standalone website."
+        opportunity = "Needs high-conversion e-commerce storefront or digital catalog with automated order intake."
+        suggested_service = "E-Commerce & WhatsApp Ordering Storefront (₹30,000+)"
+        score += 20
+        breakdown["no_website_opportunity"] = 20
+        reasons.append("Explicitly operates via DMs without standalone website (+20 pts)")
+    else:
+        # Fallback when external link was present but could not be assessed
+        website_status = "uncertain"
+        observed_problems = "Website presence has not been assessed yet; external URL in bio requires verification."
+        opportunity = "Evaluate business workflow to identify whether a custom website or web application is required."
+        suggested_service = "Digital Presence & Custom Web Development"
+        breakdown["website_status_unassessed"] = 0
+        reasons.append("Website presence not assessed (0 bonus pts: requires verification)")
 
     if contacts.get("phones"):
         score += 15
@@ -419,7 +481,7 @@ def evaluate_digital_opportunity(
     if website_status == "no_website":
         personalized_dm = (
             f"Hi {display_name}! Loved your {niche or 'work'}{city_str} on Instagram. "
-            f"Noticed you're taking orders directly via DM/WhatsApp without a dedicated website. "
+            f"Noticed you're taking customer orders directly via DM/WhatsApp without a dedicated online store. "
             f"We build lightning-fast WhatsApp-integrated online storefronts for local brands so customers can browse & order effortlessly. "
             f"Would you be open to a quick 2-min preview?"
         )
@@ -430,11 +492,17 @@ def evaluate_digital_opportunity(
             f"We help local brands build fast, modern, and reliable websites. "
             f"Happy to share a quick suggestion to get it back up and running smoothly if you'd like!"
         )
-    else:
+    elif website_status == "has_website":
         personalized_dm = (
             f"Hi {display_name}! Really liked your work on Instagram. "
             f"Took a look at your website and had a couple of ideas to boost your mobile loading speed and customer inquiries{city_str}. "
             f"Would you be open to seeing a quick feedback teardown?"
+        )
+    else:
+        personalized_dm = (
+            f"Hi {display_name}! Really liked your work on Instagram{city_str}. "
+            f"We help growing businesses build high-converting websites and modern digital experiences. "
+            f"Would you be open to a quick 2-minute preview of what we could create for {display_name}?"
         )
 
     return {
@@ -1108,7 +1176,7 @@ class InstagramBusinessSearchProvider(SearchProviderBase):
 
                 clean_name = clean_instagram_business_name(raw_title, username)
                 contacts = extract_contacts_and_links(snippet_text)
-                website_url = contacts["external_links"][0] if contacts["external_links"] else ""
+                website_url = pick_best_website_url(contacts["external_links"])
 
                 discovered_candidates.append({
                     "business_name": clean_name,

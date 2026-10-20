@@ -369,6 +369,47 @@ def init_db(db_path: str = None):
         );
         """)
 
+        # 6. Autonomous Campaigns table
+        cursor.execute(f"""
+        CREATE TABLE IF NOT EXISTS campaigns (
+            {_serial_pk()},
+            status TEXT DEFAULT 'running',
+            stage TEXT DEFAULT 'checking_apis',
+            current_step_text TEXT DEFAULT '',
+            selected_hashtags_json TEXT DEFAULT '[]',
+            meta_status_json TEXT DEFAULT '{{}}',
+            discovered_posts_count INTEGER DEFAULT 0,
+            unique_profiles_count INTEGER DEFAULT 0,
+            qualified_prospects_count INTEGER DEFAULT 0,
+            drafts_generated_count INTEGER DEFAULT 0,
+            duplicates_count INTEGER DEFAULT 0,
+            rejected_count INTEGER DEFAULT 0,
+            provider_failures_json TEXT DEFAULT '[]',
+            results_summary_json TEXT DEFAULT '[]',
+            error_message TEXT DEFAULT '',
+            started_at TEXT NOT NULL,
+            completed_at TEXT DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        """)
+
+        # 7. Researched Hashtags table
+        cursor.execute(f"""
+        CREATE TABLE IF NOT EXISTS prospecting_hashtags (
+            {_serial_pk()},
+            hashtag TEXT UNIQUE NOT NULL,
+            rationale TEXT DEFAULT '',
+            service_fit TEXT DEFAULT '',
+            times_used INTEGER DEFAULT 0,
+            last_used_at TEXT DEFAULT '',
+            prospects_found INTEGER DEFAULT 0,
+            qualified_found INTEGER DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        """)
+
         logger.info("[init_db] Core tables verified.")
 
         # Backward-compatible migrations
@@ -391,6 +432,11 @@ def init_db(db_path: str = None):
                 ("follow_up_date", "TEXT DEFAULT ''"),
                 ("outreach_action_at", "TEXT DEFAULT ''"),
                 ("conversation_id", "INTEGER DEFAULT NULL"),
+                ("source_media_id", "TEXT DEFAULT ''"),
+                ("source_media_url", "TEXT DEFAULT ''"),
+                ("source_caption", "TEXT DEFAULT ''"),
+                ("discovery_hashtag", "TEXT DEFAULT ''"),
+                ("campaign_id", "INTEGER DEFAULT NULL"),
             ):
                 if col not in lead_cols:
                     cursor.execute(f"ALTER TABLE leads ADD COLUMN {col} {col_def}")
@@ -414,7 +460,7 @@ def init_db(db_path: str = None):
                     cursor.execute(f"ALTER TABLE conversation_events ADD COLUMN {col} TEXT DEFAULT ''")
 
             # Synchronize serial sequences with current MAX(id) to avoid duplicate key violations
-            for tbl in ("leads", "conversations", "conversation_events", "knowledge_items"):
+            for tbl in ("leads", "conversations", "conversation_events", "knowledge_items", "campaigns", "prospecting_hashtags"):
                 try:
                     cursor.execute(f"""
                         SELECT setval(
@@ -445,6 +491,11 @@ def init_db(db_path: str = None):
                 ("follow_up_date", "TEXT DEFAULT ''"),
                 ("outreach_action_at", "TEXT DEFAULT ''"),
                 ("conversation_id", "INTEGER DEFAULT NULL"),
+                ("source_media_id", "TEXT DEFAULT ''"),
+                ("source_media_url", "TEXT DEFAULT ''"),
+                ("source_caption", "TEXT DEFAULT ''"),
+                ("discovery_hashtag", "TEXT DEFAULT ''"),
+                ("campaign_id", "INTEGER DEFAULT NULL"),
             ):
                 if col not in lead_cols:
                     cursor.execute(f"ALTER TABLE leads ADD COLUMN {col} {col_def}")
@@ -518,6 +569,23 @@ def init_db(db_path: str = None):
             logger.info("[init_db] Default business profile inserted.")
         else:
             logger.info("[init_db] Business profile already present.")
+
+        # Insert initial default automation settings if not present
+        cursor.execute(f"SELECT value FROM app_settings WHERE key = {_ph()}", ("automation_settings",))
+        if not cursor.fetchone():
+            default_automation = {
+                "auto_reply_enabled": True,
+                "auto_reply_paused_global": False,
+                "require_human_approval": False
+            }
+            now_sql = _now_default()
+            cursor.execute(
+                f"INSERT INTO app_settings (key, value, updated_at) VALUES ({_ph(2)}, {now_sql})",
+                ("automation_settings", json.dumps(default_automation))
+            )
+            logger.info("[init_db] Default automation settings inserted.")
+        else:
+            logger.info("[init_db] Automation settings already present.")
 
         # Seed initial knowledge items idempotently if empty or missing
         seeded = seed_initial_knowledge(cursor)

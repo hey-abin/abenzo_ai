@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from backend.app.config import settings
 from backend.app.database import init_db
-from backend.app.routers import leads, inbox, settings as app_settings, meta, knowledge
+from backend.app.routers import leads, inbox, settings as app_settings, meta, knowledge, campaigns
 
 logger = logging.getLogger("abenzo.startup")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -47,6 +47,7 @@ app.include_router(inbox.router, prefix="/api")
 app.include_router(app_settings.router, prefix="/api")
 app.include_router(meta.router, prefix="/api")
 app.include_router(knowledge.router, prefix="/api")
+app.include_router(campaigns.router, prefix="/api")
 
 @app.get("/api")
 def root():

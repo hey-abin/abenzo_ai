@@ -38,6 +38,9 @@ import {
   deleteLead, 
   checkWebsite, 
   qualifyLeadAI, 
+  recalculateLeadQualification,
+  fetchLeadMessagingStatus,
+  sendLeadMessage,
   importCSV, 
   getExportCSVUrl,
   discoverLeads,
@@ -60,14 +63,33 @@ const POPULAR_LOCATIONS = [
   "Bangalore", "Mumbai", "Delhi", "Hyderabad", "Chennai"
 ];
 
-const WEBSITE_STATUS_COLORS = {
-  found: "bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950/40 dark:text-emerald-400 dark:border-emerald-800",
-  has_website: "bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950/40 dark:text-emerald-400 dark:border-emerald-800",
-  not_found: "bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/40 dark:text-amber-400 dark:border-amber-800",
-  no_website: "bg-rose-50 text-rose-700 border-rose-200 dark:bg-rose-950/40 dark:text-rose-400 dark:border-rose-800",
-  broken_website: "bg-red-50 text-red-700 border-red-200 dark:bg-red-950/40 dark:text-red-400 dark:border-red-800",
-  uncertain: "bg-zinc-100 text-zinc-700 border-zinc-200 dark:bg-zinc-800 dark:text-zinc-400 dark:border-zinc-700"
-};
+export function getWebsiteStatusBadge(status) {
+  switch (status) {
+    case "has_website":
+    case "found":
+      return {
+        label: "Website verified",
+        className: "bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950/40 dark:text-emerald-400 dark:border-emerald-800"
+      };
+    case "broken_website":
+      return {
+        label: "Website unreachable",
+        className: "bg-red-50 text-red-700 border-red-200 dark:bg-red-950/40 dark:text-red-400 dark:border-red-800"
+      };
+    case "no_website":
+    case "not_found":
+      return {
+        label: "No website found",
+        className: "bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/40 dark:text-amber-400 dark:border-amber-800"
+      };
+    case "uncertain":
+    default:
+      return {
+        label: "Website not assessed",
+        className: "bg-zinc-100 text-zinc-700 border-zinc-200 dark:bg-zinc-800 dark:text-zinc-400 dark:border-zinc-700"
+      };
+  }
+}
 
 const OUTREACH_STATUS_OPTIONS = [
   { value: "new", label: "Discovered (New)" },
@@ -79,8 +101,10 @@ const OUTREACH_STATUS_OPTIONS = [
   { value: "interested", label: "Interested" },
   { value: "consultation_requested", label: "Consultation Requested" },
   { value: "proposal_sent", label: "Proposal Sent" },
-  { value: "converted", label: "Converted / Won" },
-  { value: "not_interested", label: "Not Interested" },
+  { value: "converted", label: "Won / Converted" },
+  { value: "won", label: "Won" },
+  { value: "not_interested", label: "Lost / Not Interested" },
+  { value: "lost", label: "Lost" },
   { value: "do_not_contact", label: "Opt-Out" },
 ];
 
@@ -181,7 +205,15 @@ function LeadsContent() {
     }
   }, [searchParams]);
 
-  // Sync selectedLead into edit state
+  // Messaging action state
+  const [messagingStatus, setMessagingStatus] = useState(null);
+  const [loadingMessagingStatus, setLoadingMessagingStatus] = useState(false);
+  const [sendingMessage, setSendingMessage] = useState(false);
+  const [sendSuccess, setSendSuccess] = useState(null);
+  const [sendError, setSendError] = useState("");
+  const [recalculatingId, setRecalculatingId] = useState(null);
+
+  // Sync selectedLead into edit state and load messaging eligibility
   useEffect(() => {
     if (selectedLead) {
       setEditDraft(selectedLead.personalized_dm || "");
@@ -193,6 +225,24 @@ function LeadsContent() {
       setEditBudget(selectedLead.budget || "");
       setEditConsent(selectedLead.consent_source || "");
       setEditFollowUp(selectedLead.follow_up_date || "");
+
+      // Check Meta messaging eligibility
+      setSendSuccess(null);
+      setSendError("");
+      setLoadingMessagingStatus(true);
+      fetchLeadMessagingStatus(selectedLead.id)
+        .then((st) => {
+          setMessagingStatus(st);
+          setLoadingMessagingStatus(false);
+        })
+        .catch(() => {
+          setMessagingStatus(null);
+          setLoadingMessagingStatus(false);
+        });
+    } else {
+      setMessagingStatus(null);
+      setSendSuccess(null);
+      setSendError("");
     }
   }, [selectedLead?.id]);
 
@@ -260,6 +310,42 @@ function LeadsContent() {
       alert("Website check failed: " + err.message);
     } finally {
       setCheckingWebId(null);
+    }
+  };
+
+  const handleRecalculateLead = async (leadId) => {
+    setRecalculatingId(leadId);
+    try {
+      const updated = await recalculateLeadQualification(leadId);
+      if (selectedLead?.id === leadId) setSelectedLead(updated);
+      setLeads((prev) => prev.map((l) => (l.id === leadId ? updated : l)));
+    } catch (err) {
+      alert("Failed to recalculate qualification: " + err.message);
+    } finally {
+      setRecalculatingId(null);
+    }
+  };
+
+  const handleSendLeadDM = async () => {
+    if (!selectedLead || sendingMessage) return;
+    const textToSend = editDraft.trim();
+    if (!textToSend) {
+      setSendError("Please provide message text to send.");
+      return;
+    }
+    setSendingMessage(true);
+    setSendError("");
+    setSendSuccess(null);
+    try {
+      const res = await sendLeadMessage(selectedLead.id, textToSend);
+      setSendSuccess(res);
+      const updatedLead = { ...selectedLead, outreach_status: "contacted", outreach_action_at: res.sent_at || new Date().toISOString() };
+      setSelectedLead(updatedLead);
+      setLeads((prev) => prev.map((l) => (l.id === selectedLead.id ? updatedLead : l)));
+    } catch (err) {
+      setSendError(err.message || "Failed to send message via Meta API.");
+    } finally {
+      setSendingMessage(false);
     }
   };
 
@@ -659,9 +745,14 @@ function LeadsContent() {
                         {/* Web & Opportunity */}
                         <td className="px-3 py-3">
                           <div className="flex items-center gap-1.5">
-                            <span className={`inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-medium border ${WEBSITE_STATUS_COLORS[lead.website_status] || WEBSITE_STATUS_COLORS.uncertain}`}>
-                              {lead.website_status === "no_website" ? "No Website" : lead.website_status}
-                            </span>
+                            {(() => {
+                              const b = getWebsiteStatusBadge(lead.website_status);
+                              return (
+                                <span className={`inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-medium border ${b.className}`}>
+                                  {b.label}
+                                </span>
+                              );
+                            })()}
                             {lead.website_url && (
                               <a
                                 href={lead.website_url.startsWith("http") ? lead.website_url : `https://${lead.website_url}`}
@@ -792,20 +883,76 @@ function LeadsContent() {
                 )}
               </div>
 
-              {/* Observed Digital Problems / Gap Alert */}
-              <div className="rounded-md bg-amber-50/60 p-3 text-xs border border-amber-200/60 dark:bg-amber-950/20 dark:border-amber-800/40">
-                <div className="font-semibold text-amber-800 dark:text-amber-300 mb-1 flex items-center gap-1.5">
-                  <AlertTriangle className="h-3.5 w-3.5 text-amber-600" />
-                  Observed Digital Presence & Opportunity
+              {/* Website Verification & Opportunity Detail */}
+              <div className="rounded-md border border-zinc-200 bg-zinc-50/70 p-3 text-xs dark:border-zinc-800 dark:bg-zinc-800/40 space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-1.5 font-semibold text-zinc-900 dark:text-zinc-100">
+                    <Globe className="h-3.5 w-3.5 text-blue-500" />
+                    <span>Website Presence & Verification</span>
+                  </div>
+                  {(() => {
+                    const b = getWebsiteStatusBadge(selectedLead.website_status);
+                    return (
+                      <span className={`inline-flex items-center rounded px-2 py-0.5 text-[10px] font-semibold border ${b.className}`}>
+                        {b.label}
+                      </span>
+                    );
+                  })()}
                 </div>
-                <p className="text-amber-900/90 dark:text-amber-200 text-[11px] leading-relaxed">
-                  {selectedLead.observed_problems || selectedLead.opportunity || "Operating primarily on Instagram. High opportunity to launch a fast, WhatsApp-integrated storefront."}
-                </p>
+
+                <div className="text-[11px] text-zinc-600 dark:text-zinc-300">
+                  <span className="font-medium text-zinc-500 dark:text-zinc-400">URL: </span>
+                  {selectedLead.website_url ? (
+                    <a
+                      href={selectedLead.website_url.startsWith("http") ? selectedLead.website_url : `https://${selectedLead.website_url}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-blue-600 underline dark:text-blue-400 break-all"
+                    >
+                      {selectedLead.website_url}
+                    </a>
+                  ) : (
+                    <span className="text-zinc-400 italic">No website URL detected in public records</span>
+                  )}
+                </div>
+
+                <div className="text-[11px] text-zinc-700 dark:text-zinc-300">
+                  <span className="font-semibold text-zinc-900 dark:text-zinc-100">Observed Opportunity: </span>
+                  {selectedLead.observed_problems || selectedLead.opportunity || "Ready for verification."}
+                </div>
+
+                {/* Concrete Evidence Summary */}
+                {(selectedLead.evidence_json?.website_check?.evidence_summary || selectedLead.evidence_json?.evidence_summary) && (
+                  <div className="rounded bg-white p-2 text-[10px] border border-zinc-200 text-zinc-600 dark:bg-zinc-900 dark:border-zinc-700 dark:text-zinc-400">
+                    <span className="font-bold text-zinc-800 dark:text-zinc-200">Verified Evidence: </span>
+                    {selectedLead.evidence_json?.website_check?.evidence_summary || selectedLead.evidence_json?.evidence_summary}
+                  </div>
+                )}
+
                 {selectedLead.suggested_service && (
-                  <div className="mt-2 text-[11px] font-medium text-indigo-700 dark:text-indigo-300">
+                  <div className="text-[11px] text-purple-700 dark:text-purple-300 font-medium">
                     Suggested Abenzo Service: <strong>{selectedLead.suggested_service}</strong>
                   </div>
                 )}
+
+                <div className="flex items-center gap-2 pt-1 border-t border-zinc-200/60 dark:border-zinc-700/60">
+                  <button
+                    onClick={() => handleCheckWebsite(selectedLead)}
+                    disabled={checkingWebId === selectedLead.id}
+                    className="inline-flex items-center gap-1 rounded bg-white px-2 py-1 text-[10px] font-medium border border-zinc-300 hover:bg-zinc-50 text-zinc-700 dark:bg-zinc-800 dark:border-zinc-700 dark:text-zinc-300 disabled:opacity-50"
+                  >
+                    <RefreshCw className={`h-2.5 w-2.5 ${checkingWebId === selectedLead.id ? "animate-spin" : ""}`} />
+                    {checkingWebId === selectedLead.id ? "Verifying..." : "Verify / Recheck Website"}
+                  </button>
+                  <button
+                    onClick={() => handleRecalculateLead(selectedLead.id)}
+                    disabled={recalculatingId === selectedLead.id}
+                    className="inline-flex items-center gap-1 rounded bg-white px-2 py-1 text-[10px] font-medium border border-zinc-300 hover:bg-zinc-50 text-purple-700 dark:bg-zinc-800 dark:border-zinc-700 dark:text-purple-400 disabled:opacity-50"
+                  >
+                    <Sparkles className="h-2.5 w-2.5" />
+                    {recalculatingId === selectedLead.id ? "Recalculating..." : "Recalculate Fit"}
+                  </button>
+                </div>
               </div>
 
               {/* Score Breakdown if present */}
@@ -838,7 +985,7 @@ function LeadsContent() {
                     >
                       {copiedId === selectedLead.id ? (
                         <>
-                          <Check className="h-3.5 w-3.5" /> Copied!
+                          <Check className="h-3.5 w-3.5" /> Copied Draft
                         </>
                       ) : (
                         <>
@@ -858,11 +1005,103 @@ function LeadsContent() {
                 />
               </div>
 
+              {/* Send Message / Outreach Action */}
+              <div className="rounded-md border border-indigo-200 bg-indigo-50/40 p-3.5 dark:border-indigo-900/40 dark:bg-indigo-950/20 space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-zinc-900 dark:text-zinc-100 flex items-center gap-1.5">
+                    <Send className="h-3.5 w-3.5 text-indigo-600 dark:text-indigo-400" />
+                    Dashboard Outreach Action
+                  </span>
+                  {loadingMessagingStatus ? (
+                    <span className="text-[10px] text-zinc-400 animate-pulse">Checking Meta policy...</span>
+                  ) : messagingStatus?.can_send ? (
+                    <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300">
+                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                      Eligible for Direct Send
+                    </span>
+                  ) : (
+                    <span className="rounded bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-800 dark:bg-amber-950/60 dark:text-amber-300">
+                      Manual Outreach Required
+                    </span>
+                  )}
+                </div>
+
+                {/* Policy guidance or eligible notice */}
+                {messagingStatus && !messagingStatus.can_send && (
+                  <div className="rounded bg-white p-2.5 text-[11px] leading-relaxed border border-amber-200 text-amber-900 dark:bg-zinc-900 dark:border-amber-800/60 dark:text-amber-200">
+                    <div className="font-semibold text-amber-800 dark:text-amber-300 flex items-center gap-1 mb-0.5">
+                      <Info className="h-3 w-3 text-amber-600" />
+                      Meta Platform Policy
+                    </div>
+                    <p className="text-[10px]">
+                      {messagingStatus.reason || "Under Meta's Platform Policy, businesses cannot initiate cold outbound direct messages via API to accounts that haven't messaged the business. Use Copy Message and Open Profile to conduct manual outreach on Instagram."}
+                    </p>
+                  </div>
+                )}
+
+                {sendSuccess && (
+                  <div className="rounded bg-emerald-100 p-2 text-[11px] font-medium text-emerald-900 border border-emerald-300 dark:bg-emerald-950/80 dark:text-emerald-200 dark:border-emerald-800 flex items-center gap-1.5">
+                    <Check className="h-3.5 w-3.5 text-emerald-600" />
+                    Message delivered via Meta API! (ID: {sendSuccess.meta_message_id})
+                  </div>
+                )}
+
+                {sendError && (
+                  <div className="rounded bg-red-100 p-2 text-[11px] text-red-900 border border-red-300 dark:bg-red-950/80 dark:text-red-200 dark:border-red-800">
+                    {sendError}
+                  </div>
+                )}
+
+                <div className="flex flex-wrap items-center gap-2 pt-1">
+                  {messagingStatus?.can_send ? (
+                    <button
+                      onClick={handleSendLeadDM}
+                      disabled={sendingMessage || Boolean(sendSuccess)}
+                      className="inline-flex items-center gap-1.5 rounded-md bg-indigo-600 px-3.5 py-1.5 text-xs font-semibold text-white shadow-xs hover:bg-indigo-700 disabled:opacity-50 transition-colors"
+                    >
+                      <Send className="h-3.5 w-3.5" />
+                      {sendingMessage ? "Sending to Instagram..." : sendSuccess ? "Delivered" : "Send Message"}
+                    </button>
+                  ) : null}
+
+                  <button
+                    onClick={() => handleCopyDM(editDraft, selectedLead.id)}
+                    className="inline-flex items-center gap-1.5 rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-xs font-semibold text-zinc-700 hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
+                  >
+                    {copiedId === selectedLead.id ? (
+                      <>
+                        <Check className="h-3.5 w-3.5 text-emerald-600" /> Copied Draft
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="h-3.5 w-3.5" /> Copy Message
+                      </>
+                    )}
+                  </button>
+
+                  {(selectedLead.instagram_url || selectedLead.instagram_handle) && (
+                    <a
+                      href={selectedLead.instagram_url || `https://instagram.com/${selectedLead.instagram_handle}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex items-center gap-1.5 rounded-md bg-gradient-to-r from-pink-600 via-rose-600 to-amber-600 px-3 py-1.5 text-xs font-semibold text-white shadow-xs hover:opacity-90"
+                    >
+                      <InstagramIcon className="h-3.5 w-3.5" />
+                      Open Profile ({selectedLead.instagram_handle ? `@${selectedLead.instagram_handle}` : "Instagram"})
+                      <ExternalLink className="h-3 w-3" />
+                    </a>
+                  )}
+                </div>
+                <p className="text-[10px] text-zinc-400">
+                  * Copied drafts are never presented as delivered messages. Delivery status is updated only when the API confirms delivery.
+                </p>
+              </div>
+
               {/* Human-Reviewed Outreach Queue Action Buttons */}
               <div className="border-t border-zinc-100 pt-3 dark:border-zinc-800">
                 <div className="flex items-center justify-between mb-2">
                   <span className="text-[11px] font-semibold text-zinc-700 dark:text-zinc-300">
-                    Operator Action:
+                    Lead Lifecycle Status:
                   </span>
                   {selectedLead.outreach_action_at && (
                     <span className="text-[10px] text-zinc-400">
@@ -879,7 +1118,7 @@ function LeadsContent() {
                         : "bg-pink-50 text-pink-700 border border-pink-200 hover:bg-pink-100 dark:bg-pink-950/40 dark:text-pink-300 dark:border-pink-800"
                     }`}
                   >
-                    Mark Followed
+                    Followed
                   </button>
                   <button
                     onClick={() => handleStatusChange(selectedLead.id, "contacted")}
@@ -889,7 +1128,7 @@ function LeadsContent() {
                         : "bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100 dark:bg-blue-950/40 dark:text-blue-300 dark:border-blue-800"
                     }`}
                   >
-                    Mark Contacted
+                    Contacted
                   </button>
                   <button
                     onClick={() => handleStatusChange(selectedLead.id, "replied")}
@@ -899,7 +1138,7 @@ function LeadsContent() {
                         : "bg-purple-50 text-purple-700 border border-purple-200 hover:bg-purple-100 dark:bg-purple-950/40 dark:text-purple-300 dark:border-purple-800"
                     }`}
                   >
-                    Mark Replied
+                    Replied
                   </button>
                   <button
                     onClick={() => handleStatusChange(selectedLead.id, "interested")}
@@ -912,20 +1151,44 @@ function LeadsContent() {
                     Interested
                   </button>
                   <button
-                    onClick={() => handleStatusChange(selectedLead.id, "converted")}
+                    onClick={() => handleStatusChange(selectedLead.id, "consultation_requested")}
                     className={`rounded px-2 py-1 text-[11px] font-medium transition-colors ${
-                      selectedLead.outreach_status === "converted"
+                      selectedLead.outreach_status === "consultation_requested"
+                        ? "bg-teal-600 text-white"
+                        : "bg-teal-50 text-teal-700 border border-teal-200 hover:bg-teal-100 dark:bg-teal-950/40 dark:text-teal-300 dark:border-teal-800"
+                    }`}
+                  >
+                    Consultation Requested
+                  </button>
+                  <button
+                    onClick={() => handleStatusChange(selectedLead.id, "proposal_sent")}
+                    className={`rounded px-2 py-1 text-[11px] font-medium transition-colors ${
+                      selectedLead.outreach_status === "proposal_sent"
+                        ? "bg-sky-600 text-white"
+                        : "bg-sky-50 text-sky-700 border border-sky-200 hover:bg-sky-100 dark:bg-sky-950/40 dark:text-sky-300 dark:border-sky-800"
+                    }`}
+                  >
+                    Proposal Sent
+                  </button>
+                  <button
+                    onClick={() => handleStatusChange(selectedLead.id, "won")}
+                    className={`rounded px-2 py-1 text-[11px] font-medium transition-colors ${
+                      selectedLead.outreach_status === "won" || selectedLead.outreach_status === "converted"
                         ? "bg-emerald-600 text-white"
                         : "bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 dark:bg-emerald-950/40 dark:text-emerald-300 dark:border-emerald-800"
                     }`}
                   >
-                    Won / Converted
+                    Won
                   </button>
                   <button
-                    onClick={() => handleStatusChange(selectedLead.id, "not_interested")}
-                    className="rounded bg-zinc-100 px-2 py-1 text-[11px] font-medium text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-800 dark:text-zinc-400"
+                    onClick={() => handleStatusChange(selectedLead.id, "lost")}
+                    className={`rounded px-2 py-1 text-[11px] font-medium transition-colors ${
+                      selectedLead.outreach_status === "lost" || selectedLead.outreach_status === "not_interested"
+                        ? "bg-zinc-700 text-white"
+                        : "bg-zinc-100 text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-800 dark:text-zinc-400"
+                    }`}
                   >
-                    Not Interested
+                    Lost
                   </button>
                 </div>
               </div>

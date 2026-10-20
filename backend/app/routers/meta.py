@@ -232,18 +232,34 @@ async def receive_meta_webhook(
 
     # Step 1: Short read transaction: load business profile
     agency_profile = {}
+    automation_cfg = {
+        "auto_reply_enabled": True,
+        "auto_reply_paused_global": False,
+        "require_human_approval": False
+    }
     try:
         with get_db() as conn:
             cursor = conn.cursor()
+            cursor.execute("SELECT value FROM app_settings WHERE key = 'automation_settings'")
+            auto_row = cursor.fetchone()
+            if auto_row:
+                try:
+                    automation_cfg.update(json.loads(auto_row["value"]))
+                except Exception:
+                    pass
             cursor.execute("SELECT value FROM app_settings WHERE key = 'business_profile'")
             prof_row = cursor.fetchone()
             if prof_row:
                 agency_profile = json.loads(prof_row["value"])
+                if not auto_row and "auto_reply_faq_enabled" in agency_profile:
+                    automation_cfg["auto_reply_enabled"] = bool(agency_profile["auto_reply_faq_enabled"])
     except Exception as e:
         logger.warning("Could not load business profile in webhook handler: %s", type(e).__name__)
         agency_profile = {}
 
-    auto_reply_enabled = bool(agency_profile.get("auto_reply_faq_enabled", False))
+    auto_reply_enabled = bool(automation_cfg.get("auto_reply_enabled", True))
+    auto_reply_paused_global = bool(automation_cfg.get("auto_reply_paused_global", False))
+    require_human_approval = bool(automation_cfg.get("require_human_approval", True))
 
     # Step 2: Extract all inbound message events across entries
     raw_messaging = []
@@ -318,6 +334,20 @@ async def receive_meta_webhook(
                         WHERE conversation_id = ? OR id = (SELECT lead_id FROM conversations WHERE id = ?)
                     """, (conv_id, conv_id))
                     matched_lead = cursor.fetchone()
+
+                    # Reliable fallback identifier linking: match by handle or sender_id if not yet explicitly linked
+                    if not matched_lead and sender_id:
+                        cursor.execute("""
+                            SELECT id, business_name, suggested_service, observed_problems, website_status, outreach_status
+                            FROM leads
+                            WHERE instagram_handle = ? OR instagram_url LIKE ? OR source_url LIKE ?
+                            ORDER BY id DESC LIMIT 1
+                        """, (sender_id, f"%{sender_id}%", f"%{sender_id}%"))
+                        matched_lead = cursor.fetchone()
+                        if matched_lead:
+                            cursor.execute("UPDATE conversations SET lead_id = ? WHERE id = ?", (matched_lead["id"], conv_id))
+                            cursor.execute("UPDATE leads SET conversation_id = ? WHERE id = ?", (conv_id, matched_lead["id"]))
+
                     if matched_lead:
                         if matched_lead["outreach_status"] in ("new", "draft", "contacted", "reviewed", "followed"):
                             cursor.execute("""
@@ -395,7 +425,9 @@ async def receive_meta_webhook(
         # Determine if eligible for automated outbound dispatch
         is_auto_reply_eligible = (
             auto_reply_enabled and
+            not auto_reply_paused_global and
             not auto_reply_paused and
+            not require_human_approval and
             bool(ai_draft) and
             not needs_human and
             bool(settings.effective_instagram_token) and
@@ -483,6 +515,36 @@ async def receive_meta_webhook(
                             updated_at = ?
                         WHERE id = ?
                     """, (lead_temp, updated_summary, json.dumps(updated_lead_context), suggested_stage, now, now, conv_id))
+
+                # Update linked lead in CRM if customer voluntarily shared requirements/budget/timeline/contacts
+                cursor.execute("SELECT lead_id FROM conversations WHERE id = ?", (conv_id,))
+                conv_lead_row = cursor.fetchone()
+                if conv_lead_row and conv_lead_row["lead_id"]:
+                    target_lead_id = conv_lead_row["lead_id"]
+                    ctx = updated_lead_context or {}
+                    v_phone = (ctx.get("phone") or ctx.get("phone_number") or "").strip()
+                    v_email = (ctx.get("email") or "").strip()
+                    v_budget = (ctx.get("budget") or "").strip()
+                    v_timeline = (ctx.get("timeline") or "").strip()
+
+                    lead_updates = []
+                    lead_params = []
+                    if v_phone:
+                        lead_updates.append("public_phone = ?")
+                        lead_params.append(v_phone)
+                    if v_email:
+                        lead_updates.append("public_email = ?")
+                        lead_params.append(v_email)
+                    if v_budget:
+                        lead_updates.append("budget = ?")
+                        lead_params.append(v_budget)
+                    if v_timeline:
+                        lead_updates.append("project_timeline = ?")
+                        lead_params.append(v_timeline)
+
+                    if lead_updates:
+                        lead_params.extend([now, target_lead_id])
+                        cursor.execute(f"UPDATE leads SET {', '.join(lead_updates)}, updated_at = ? WHERE id = ?", lead_params)
 
                 processed_count += 1
                 conn.commit()

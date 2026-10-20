@@ -54,6 +54,31 @@ export async function checkWebsite(id) {
   return res.json();
 }
 
+export async function recalculateLeadQualification(id) {
+  const res = await fetch(`${API_BASE}/leads/${id}/recalculate-qualification`, { method: "POST" });
+  if (!res.ok) throw new Error("Failed to recalculate lead qualification");
+  return res.json();
+}
+
+export async function fetchLeadMessagingStatus(leadId) {
+  const res = await fetch(`${API_BASE}/leads/${leadId}/messaging-status`, { cache: "no-store" });
+  if (!res.ok) throw new Error("Failed to load messaging status");
+  return res.json();
+}
+
+export async function sendLeadMessage(leadId, messageText = "") {
+  const res = await fetch(`${API_BASE}/leads/${leadId}/send-message`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message_text: messageText }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: "Failed to send message" }));
+    throw new Error(err.detail || "Failed to send message");
+  }
+  return res.json();
+}
+
 export async function qualifyLeadAI(id) {
   const res = await fetch(`${API_BASE}/leads/${id}/qualify-ai`, { method: "POST" });
   if (!res.ok) {
@@ -158,6 +183,22 @@ export async function fetchMetaStatus() {
   return res.json();
 }
 
+export async function fetchAutomationSettings() {
+  const res = await fetch(`${API_BASE}/settings/automation`, { cache: "no-store" });
+  if (!res.ok) throw new Error("Failed to load automation settings");
+  return res.json();
+}
+
+export async function updateAutomationSettings(data) {
+  const res = await fetch(`${API_BASE}/settings/automation`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) throw new Error("Failed to update automation settings");
+  return res.json();
+}
+
 export async function testMetaConnection() {
   const res = await fetch(`${API_BASE}/meta/test-connection`, { method: "POST" });
   if (!res.ok) throw new Error("Failed to test connection");
@@ -257,3 +298,57 @@ export async function updateConversation(id, data) {
   if (!res.ok) throw new Error("Failed to update conversation");
   return res.json();
 }
+
+// ---------------------------------------------------------------------------
+// Autonomous Prospecting Campaign API
+// ---------------------------------------------------------------------------
+
+export async function startCampaign(params = {}) {
+  const res = await fetch(`${API_BASE}/campaigns/start`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(params),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: "Failed to start campaign" }));
+    throw new Error(err.detail || "Failed to start campaign");
+  }
+  return res.json();
+}
+
+export async function fetchActiveCampaign() {
+  const res = await fetch(`${API_BASE}/campaigns/active`, { cache: "no-store" });
+  if (!res.ok) throw new Error("Failed to load active campaign");
+  return res.json();
+}
+
+export async function fetchCampaign(id) {
+  const res = await fetch(`${API_BASE}/campaigns/${id}`, { cache: "no-store" });
+  if (!res.ok) throw new Error("Failed to load campaign");
+  return res.json();
+}
+
+export async function cancelCampaign(id) {
+  const res = await fetch(`${API_BASE}/campaigns/${id}/cancel`, { method: "POST" });
+  if (!res.ok) throw new Error("Failed to cancel campaign");
+  return res.json();
+}
+
+export async function fetchCampaigns() {
+  const res = await fetch(`${API_BASE}/campaigns`, { cache: "no-store" });
+  if (!res.ok) throw new Error("Failed to load campaigns");
+  return res.json();
+}
+
+export async function fetchResearchedHashtags() {
+  const res = await fetch(`${API_BASE}/campaigns/hashtags`, { cache: "no-store" });
+  if (!res.ok) throw new Error("Failed to load researched hashtags");
+  return res.json();
+}
+
+export async function fetchMetaCapabilities() {
+  const res = await fetch(`${API_BASE}/campaigns/meta-capabilities`, { cache: "no-store" });
+  if (!res.ok) throw new Error("Failed to load Meta capabilities");
+  return res.json();
+}
+

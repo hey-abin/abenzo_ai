@@ -14,25 +14,36 @@ import {
   Trash2,
   Shield,
   HelpCircle,
-  Sparkles
+  Sparkles,
+  Sliders,
+  Pause,
+  Play,
+  ShieldCheck,
+  ExternalLink
 } from "lucide-react";
+import Link from "next/link";
 import InstagramIcon from "@/components/InstagramIcon";
 import { 
   fetchSystemHealth, 
   fetchBusinessProfile, 
   updateBusinessProfile, 
   fetchMetaStatus,
-  testMetaConnection
+  testMetaConnection,
+  fetchAutomationSettings,
+  updateAutomationSettings
 } from "@/lib/api";
 
 export default function SettingsPage() {
   const [health, setHealth] = useState(null);
   const [metaStatus, setMetaStatus] = useState(null);
   const [profile, setProfile] = useState(null);
+  const [automationSettings, setAutomationSettings] = useState(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
   const [saving, setSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
+  const [savingAutomation, setSavingAutomation] = useState(false);
+  const [automationSuccess, setAutomationSuccess] = useState(false);
   const [testingMeta, setTestingMeta] = useState(false);
 
   const loadAll = () => {
@@ -41,12 +52,14 @@ export default function SettingsPage() {
     Promise.all([
       fetchSystemHealth(),
       fetchMetaStatus(),
-      fetchBusinessProfile()
+      fetchBusinessProfile(),
+      fetchAutomationSettings().catch(() => null)
     ])
-      .then(([h, m, p]) => {
+      .then(([h, m, p, a]) => {
         setHealth(h);
         setMetaStatus(m);
         setProfile(p);
+        if (a) setAutomationSettings(a);
         setLoadError(null);
         setLoading(false);
       })
@@ -92,6 +105,30 @@ export default function SettingsPage() {
       alert("Failed to save profile: " + err.message);
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleSaveAutomation = async (e) => {
+    if (e) e.preventDefault();
+    if (!automationSettings) return;
+    setSavingAutomation(true);
+    setAutomationSuccess(false);
+    try {
+      const updated = await updateAutomationSettings({
+        auto_reply_enabled: Boolean(automationSettings.auto_reply_enabled),
+        auto_reply_paused_global: Boolean(automationSettings.auto_reply_paused_global),
+        require_human_approval: Boolean(automationSettings.require_human_approval)
+      });
+      setAutomationSettings(updated);
+      if (profile) {
+        setProfile({ ...profile, auto_reply_faq_enabled: updated.auto_reply_enabled });
+      }
+      setAutomationSuccess(true);
+      setTimeout(() => setAutomationSuccess(false), 3000);
+    } catch (err) {
+      alert("Failed to save automation settings: " + err.message);
+    } finally {
+      setSavingAutomation(false);
     }
   };
 
@@ -373,24 +410,241 @@ export default function SettingsPage() {
           </div>
         </div>
 
-        {/* Business Profile Editor */}
-        <div className="lg:col-span-2 rounded-lg border border-zinc-200 bg-white p-6 shadow-xs dark:border-zinc-800 dark:bg-zinc-900">
-          <div className="flex items-center justify-between border-b border-zinc-100 pb-3 mb-4 dark:border-zinc-800">
-            <div>
-              <h2 className="text-base font-bold text-zinc-900 dark:text-zinc-100 flex items-center gap-2">
-                <Building className="h-4 w-4 text-zinc-600" />
-                Abenzo Business Profile & Approved FAQs
-              </h2>
-              <p className="text-xs text-zinc-500">
-                The local AI references these exact facts when drafting replies and qualification notes.
-              </p>
+        {/* Right Column: Automation Rules & Business Profile */}
+        <div className="lg:col-span-2 space-y-6">
+          {/* Instagram Automation & Messaging Rules Card */}
+          <div className="rounded-lg border border-zinc-200 bg-white p-6 shadow-xs dark:border-zinc-800 dark:bg-zinc-900">
+            <div className="flex items-center justify-between border-b border-zinc-100 pb-3 mb-5 dark:border-zinc-800">
+              <div>
+                <h2 className="text-base font-bold text-zinc-900 dark:text-zinc-100 flex items-center gap-2">
+                  <Sliders className="h-4 w-4 text-purple-600" />
+                  Instagram Automation & Messaging Compliance
+                </h2>
+                <p className="text-xs text-zinc-500">
+                  Configure automated response behavior, safety pauses, human-in-the-loop review, and Meta policy compliance.
+                </p>
+              </div>
+              {automationSuccess && (
+                <span className="inline-flex items-center gap-1 rounded bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-400">
+                  <CheckCircle className="h-3.5 w-3.5" /> Saved!
+                </span>
+              )}
             </div>
-            {saveSuccess && (
-              <span className="inline-flex items-center gap-1 rounded bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-400">
-                <CheckCircle className="h-3.5 w-3.5" /> Saved!
-              </span>
+
+            {automationSettings ? (
+              <form onSubmit={handleSaveAutomation} className="space-y-4 text-xs">
+                {/* 1. Master Auto-Reply Toggle */}
+                <div className="rounded-lg border border-zinc-200 p-4 bg-zinc-50/50 dark:border-zinc-800 dark:bg-zinc-800/20">
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="font-semibold text-zinc-900 dark:text-zinc-100 text-sm">
+                          Automatic Inbound DM Replies
+                        </span>
+                        <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${
+                          automationSettings.auto_reply_enabled
+                            ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-400"
+                            : "bg-zinc-200 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-400"
+                        }`}>
+                          {automationSettings.auto_reply_enabled ? "Enabled" : "Disabled"}
+                        </span>
+                      </div>
+                      <p className="text-zinc-500 text-[11px] mt-1 leading-relaxed">
+                        When enabled, the AI evaluates incoming direct messages from users who contact you on Instagram. Only legitimate customer inquiries grounded in approved business FAQs are processed.
+                      </p>
+                    </div>
+                    <label className="relative inline-flex items-center cursor-pointer shrink-0 mt-0.5">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(automationSettings.auto_reply_enabled)}
+                        onChange={(e) => setAutomationSettings({
+                          ...automationSettings,
+                          auto_reply_enabled: e.target.checked
+                        })}
+                        className="sr-only peer"
+                      />
+                      <div className="w-11 h-6 bg-zinc-300 peer-focus:outline-none rounded-full peer dark:bg-zinc-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all dark:border-zinc-600 peer-checked:bg-purple-600"></div>
+                    </label>
+                  </div>
+                </div>
+
+                {/* 2. Global Safety Pause / Resume */}
+                <div className={`rounded-lg border p-4 transition-colors ${
+                  automationSettings.auto_reply_paused_global
+                    ? "border-amber-300 bg-amber-50/60 dark:border-amber-900/50 dark:bg-amber-950/20"
+                    : "border-zinc-200 bg-zinc-50/50 dark:border-zinc-800 dark:bg-zinc-800/20"
+                }`}>
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="font-semibold text-zinc-900 dark:text-zinc-100 text-sm flex items-center gap-1.5">
+                          {automationSettings.auto_reply_paused_global ? (
+                            <Pause className="h-4 w-4 text-amber-600" />
+                          ) : (
+                            <Play className="h-4 w-4 text-emerald-600" />
+                          )}
+                          Global Automation Circuit Breaker
+                        </span>
+                        <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${
+                          automationSettings.auto_reply_paused_global
+                            ? "bg-amber-100 text-amber-900 dark:bg-amber-950/60 dark:text-amber-300"
+                            : "bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-400"
+                        }`}>
+                          {automationSettings.auto_reply_paused_global ? "Global Pause Active" : "Running Normally"}
+                        </span>
+                      </div>
+                      <p className="text-zinc-500 text-[11px] mt-1 leading-relaxed">
+                        Instantly pause all automated outbound message dispatch globally across all conversations. Inbound messages and webhooks will still be received and stored in your inbox/CRM, but zero automatic messages will be sent.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setAutomationSettings({
+                        ...automationSettings,
+                        auto_reply_paused_global: !automationSettings.auto_reply_paused_global
+                      })}
+                      className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-semibold shrink-0 transition-colors ${
+                        automationSettings.auto_reply_paused_global
+                          ? "bg-emerald-600 text-white hover:bg-emerald-700"
+                          : "bg-amber-600 text-white hover:bg-amber-700"
+                      }`}
+                    >
+                      {automationSettings.auto_reply_paused_global ? (
+                        <>
+                          <Play className="h-3.5 w-3.5" /> Resume Automation
+                        </>
+                      ) : (
+                        <>
+                          <Pause className="h-3.5 w-3.5" /> Pause Globally
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+
+                {/* 3. Human Approval Requirement Toggle */}
+                <div className="rounded-lg border border-zinc-200 p-4 bg-zinc-50/50 dark:border-zinc-800 dark:bg-zinc-800/20">
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="font-semibold text-zinc-900 dark:text-zinc-100 text-sm flex items-center gap-1.5">
+                          <ShieldCheck className="h-4 w-4 text-blue-600" />
+                          Require Human Approval for AI Replies
+                        </span>
+                        <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${
+                          automationSettings.require_human_approval
+                            ? "bg-blue-100 text-blue-800 dark:bg-blue-950/60 dark:text-blue-400"
+                            : "bg-zinc-200 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-400"
+                        }`}>
+                          {automationSettings.require_human_approval ? "Human Approval Required" : "Autonomous Sending"}
+                        </span>
+                      </div>
+                      <p className="text-zinc-500 text-[11px] mt-1 leading-relaxed">
+                        When enabled, AI prepares response drafts with confidence scores and FAQ citations, holding them in the Inbox for manual operator review. When disabled, only routine high-confidence FAQ questions are auto-dispatched.
+                      </p>
+                    </div>
+                    <label className="relative inline-flex items-center cursor-pointer shrink-0 mt-0.5">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(automationSettings.require_human_approval)}
+                        onChange={(e) => setAutomationSettings({
+                          ...automationSettings,
+                          require_human_approval: e.target.checked
+                        })}
+                        className="sr-only peer"
+                      />
+                      <div className="w-11 h-6 bg-zinc-300 peer-focus:outline-none rounded-full peer dark:bg-zinc-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all dark:border-zinc-600 peer-checked:bg-blue-600"></div>
+                    </label>
+                  </div>
+                </div>
+
+                {/* 4. Per-Conversation Granular Control Note & Link */}
+                <div className="rounded-lg border border-zinc-200 p-4 bg-zinc-50/50 dark:border-zinc-800 dark:bg-zinc-800/20">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <span className="font-semibold text-zinc-900 dark:text-zinc-100 text-xs">
+                        Per-Conversation Auto-Reply Pause & Takeover
+                      </span>
+                      <p className="text-zinc-500 text-[11px] mt-1 leading-relaxed">
+                        Every conversation thread can also be paused individually. If an operator types a manual reply or clicks &quot;Take Over / Pause Auto-Reply&quot; in the Inbox, automation is halted specifically for that prospect while remaining active for others.
+                      </p>
+                    </div>
+                    <Link
+                      href="/inbox"
+                      className="inline-flex items-center gap-1 rounded border border-zinc-300 bg-white px-2.5 py-1 text-[11px] font-medium text-zinc-700 hover:bg-zinc-50 shrink-0 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+                    >
+                      Go to Inbox <ExternalLink className="h-3 w-3" />
+                    </Link>
+                  </div>
+                </div>
+
+                {/* 5. Meta Permissions & Messaging Policy Compliance Status */}
+                <div className="rounded-lg border border-zinc-200 p-4 bg-zinc-50/40 dark:border-zinc-800 dark:bg-zinc-800/10 space-y-2.5">
+                  <span className="font-semibold text-zinc-900 dark:text-zinc-100 text-xs flex items-center gap-1.5">
+                    <Shield className="h-3.5 w-3.5 text-zinc-600" />
+                    Meta Platform Policy & Messaging Permissions
+                  </span>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px]">
+                    <div className="rounded bg-white p-2.5 border border-zinc-200 dark:bg-zinc-900 dark:border-zinc-800">
+                      <span className="font-medium text-zinc-600 dark:text-zinc-400">Account Connection:</span>
+                      <div className="font-semibold text-zinc-900 dark:text-zinc-100 mt-0.5">
+                        {automationSettings.meta_status?.username ? `@${automationSettings.meta_status.username}` : (metaStatus?.username ? `@${metaStatus.username}` : "Not Connected")}
+                      </div>
+                      <div className="text-[10px] text-zinc-400 mt-0.5">
+                        ID: {automationSettings.meta_status?.account_id || metaStatus?.account_id || "None"}
+                      </div>
+                    </div>
+                    <div className="rounded bg-white p-2.5 border border-zinc-200 dark:bg-zinc-900 dark:border-zinc-800">
+                      <span className="font-medium text-zinc-600 dark:text-zinc-400">24-Hour Messaging Window:</span>
+                      <div className="font-semibold text-emerald-600 dark:text-emerald-400 mt-0.5">
+                        Meta Compliant
+                      </div>
+                      <div className="text-[10px] text-zinc-400 mt-0.5">
+                        Only responsive replies permitted; unsolicited cold DMs blocked
+                      </div>
+                    </div>
+                  </div>
+                  <div className="rounded bg-amber-50/70 p-2 text-[10px] text-amber-800 dark:bg-amber-950/40 dark:text-amber-300 border border-amber-200 dark:border-amber-900/40">
+                    <strong>Official Meta Policy:</strong> Businesses cannot initiate cold, unsolicited DMs to Instagram users who haven&apos;t contacted them. For first contact, use the Prospecting CRM to copy tailored outreach drafts and reach out manually on Instagram.
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-end pt-2 border-t border-zinc-100 dark:border-zinc-800">
+                  <button
+                    type="submit"
+                    disabled={savingAutomation}
+                    className="inline-flex items-center gap-1.5 rounded-md bg-purple-600 px-4 py-2 font-medium text-white hover:bg-purple-700 disabled:opacity-50"
+                  >
+                    <Save className="h-4 w-4" />
+                    {savingAutomation ? "Saving Rules..." : "Save Automation Rules"}
+                  </button>
+                </div>
+              </form>
+            ) : (
+              <div className="py-6 text-center text-xs text-zinc-400">
+                Loading automation configuration...
+              </div>
             )}
           </div>
+
+          {/* Business Profile Editor Card */}
+          <div className="rounded-lg border border-zinc-200 bg-white p-6 shadow-xs dark:border-zinc-800 dark:bg-zinc-900">
+            <div className="flex items-center justify-between border-b border-zinc-100 pb-3 mb-4 dark:border-zinc-800">
+              <div>
+                <h2 className="text-base font-bold text-zinc-900 dark:text-zinc-100 flex items-center gap-2">
+                  <Building className="h-4 w-4 text-zinc-600" />
+                  Abenzo Business Profile & Approved FAQs
+                </h2>
+                <p className="text-xs text-zinc-500">
+                  The local AI references these exact facts when drafting replies and qualification notes.
+                </p>
+              </div>
+              {saveSuccess && (
+                <span className="inline-flex items-center gap-1 rounded bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-400">
+                  <CheckCircle className="h-3.5 w-3.5" /> Saved!
+                </span>
+              )}
+            </div>
 
           {profile && (
             <form onSubmit={handleSaveProfile} className="space-y-4 text-xs">
@@ -575,5 +829,6 @@ export default function SettingsPage() {
         </div>
       </div>
     </div>
-  );
+  </div>
+);
 }

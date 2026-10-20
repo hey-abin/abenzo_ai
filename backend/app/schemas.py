@@ -84,6 +84,11 @@ class LeadResponse(BaseModel):
     follow_up_date: Optional[str] = ""
     outreach_action_at: Optional[str] = ""
     conversation_id: Optional[int] = None
+    source_media_id: Optional[str] = ""
+    source_media_url: Optional[str] = ""
+    source_caption: Optional[str] = ""
+    discovery_hashtag: Optional[str] = ""
+    campaign_id: Optional[int] = None
     outreach_status: str
     created_at: str
     updated_at: str
@@ -303,3 +308,101 @@ class MetaStatus(BaseModel):
     guidance: str = ""
     error_details: Optional[str] = None
     tested_at: Optional[str] = None
+
+class LeadSendMessageRequest(BaseModel):
+    message_text: Optional[str] = None
+
+class LeadSendMessageResponse(BaseModel):
+    status: str
+    delivery_status: str
+    meta_message_id: Optional[str] = ""
+    event_id: Optional[int] = None
+    conversation_id: Optional[int] = None
+    lead_id: int
+    sent_at: Optional[str] = ""
+    error_details: Optional[str] = ""
+
+class LeadMessagingStatusResponse(BaseModel):
+    eligible: bool
+    can_send: bool
+    conversation_id: Optional[int] = None
+    recipient_id: Optional[str] = ""
+    platform: str = "manual"
+    within_messaging_window: bool = False
+    meta_connected: bool = False
+    reason: str
+    suggested_action: str  # 'dashboard_send' | 'manual_outreach'
+    outreach_status: str = "new"
+    draft_message: Optional[str] = ""
+
+class AutomationSettings(BaseModel):
+    auto_reply_enabled: bool = True
+    auto_reply_paused_global: bool = False
+    require_human_approval: bool = False
+
+class AutomationSettingsResponse(BaseModel):
+    auto_reply_enabled: bool
+    auto_reply_paused_global: bool
+    require_human_approval: bool
+    meta_status: Dict[str, Any]
+    messaging_policy: str = "Meta Graph API policy strictly prohibits automated cold outbound DMs to users who have not previously initiated contact. Inbound messages are supported within a 24-hour window."
+
+# ---------------------------------------------------------------------------
+# Autonomous Prospecting Campaign Schemas
+# ---------------------------------------------------------------------------
+
+class ResearchedHashtagItem(BaseModel):
+    hashtag: str
+    rationale: str = ""
+    service_fit: str = ""
+    times_used: int = 0
+    last_used_at: Optional[str] = ""
+    prospects_found: int = 0
+    qualified_found: int = 0
+
+class CampaignProspectItem(BaseModel):
+    lead_id: Optional[int] = None
+    business_name: str
+    instagram_handle: Optional[str] = ""
+    instagram_url: Optional[str] = ""
+    source_media_url: Optional[str] = ""
+    source_media_id: Optional[str] = ""
+    source_caption: Optional[str] = ""
+    website_url: Optional[str] = ""
+    website_status: str = "uncertain"
+    lead_score: int = 0
+    confidence: str = "medium"
+    opportunity: str = ""
+    recommended_service: str = ""
+    evidence: List[str] = []
+    personalized_dm: str = ""
+    discovery_hashtag: str = ""
+    outreach_status: str = "draft"
+    is_duplicate: bool = False
+    rejection_reason: Optional[str] = None
+
+class CampaignResponse(BaseModel):
+    id: int
+    status: str  # 'running', 'completed', 'failed', 'cancelled'
+    stage: str   # 'checking_apis', 'researching_hashtags', 'discovering_media', 'analyzing_prospects', 'qualifying', 'generating_drafts', 'saving_crm', 'completed', 'failed', 'cancelled'
+    current_step_text: str = ""
+    selected_hashtags: List[Dict[str, Any]] = []
+    meta_status: Dict[str, Any] = {}
+    discovered_posts_count: int = 0
+    unique_profiles_count: int = 0
+    qualified_prospects_count: int = 0
+    drafts_generated_count: int = 0
+    duplicates_count: int = 0
+    rejected_count: int = 0
+    provider_failures: List[str] = []
+    results_summary: List[Dict[str, Any]] = []
+    error_message: Optional[str] = None
+    started_at: str
+    completed_at: Optional[str] = ""
+    created_at: str
+    updated_at: str
+
+class CampaignStartRequest(BaseModel):
+    max_hashtags: Optional[int] = 4
+    limit_per_hashtag: Optional[int] = 5
+

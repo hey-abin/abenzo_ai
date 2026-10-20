@@ -46,13 +46,17 @@ async def check_website(url: str, timeout_seconds: float = 6.0) -> WebsiteCheckR
                 has_ecommerce = any(k in text_lower for k in ["cart", "checkout", "buy now", "order now", "shop"])
                 has_viewport = bool(soup.find("meta", attrs={"name": "viewport"}))
 
-                summary = f"Active website verified (HTTP {status_code}). Title: '{title[:60]}'."
+                is_https = str(resp.url).startswith("https://")
+                summary = f"Website verified live (HTTP {status_code})."
+                if is_https:
+                    summary += " Valid HTTPS secured."
+                summary += f" Title: '{title[:50]}'."
                 if not has_viewport:
-                    summary += " May lack modern mobile viewport tag."
+                    summary += " May lack modern responsive viewport tag."
                 if not has_contact:
                     summary += " No obvious contact/inquiry form detected on homepage."
                 if has_ecommerce:
-                    summary += " E-commerce/ordering elements present."
+                    summary += " E-commerce/ordering features present."
 
                 return WebsiteCheckResult(
                     url=str(resp.url),
@@ -65,6 +69,7 @@ async def check_website(url: str, timeout_seconds: float = 6.0) -> WebsiteCheckR
                     evidence_summary=summary,
                     raw_details={
                         "final_url": str(resp.url),
+                        "is_https": is_https,
                         "has_ecommerce": has_ecommerce,
                         "title": title
                     }
@@ -72,9 +77,16 @@ async def check_website(url: str, timeout_seconds: float = 6.0) -> WebsiteCheckR
             elif status_code == 404:
                 return WebsiteCheckResult(
                     url=clean_url,
-                    status="not_found",
+                    status="broken_website",
                     status_code=status_code,
-                    evidence_summary=f"Domain returned HTTP 404 Not Found. Domain may be parked or inactive."
+                    evidence_summary=f"Website unreachable: Domain returned HTTP 404 Not Found. Page or site may be inactive."
+                )
+            elif status_code >= 500:
+                return WebsiteCheckResult(
+                    url=clean_url,
+                    status="broken_website",
+                    status_code=status_code,
+                    evidence_summary=f"Website unreachable: Server returned HTTP {status_code} internal error."
                 )
             else:
                 return WebsiteCheckResult(
@@ -87,18 +99,18 @@ async def check_website(url: str, timeout_seconds: float = 6.0) -> WebsiteCheckR
     except httpx.ConnectError:
         return WebsiteCheckResult(
             url=clean_url,
-            status="not_found",
-            evidence_summary="Connection could not be established. Domain may not resolve or server is down."
+            status="broken_website",
+            evidence_summary="Website unreachable: Connection could not be established. Domain may not resolve or server is down."
         )
     except httpx.TimeoutException:
         return WebsiteCheckResult(
             url=clean_url,
             status="uncertain",
-            evidence_summary="Request timed out after 6 seconds. Website may be slow, geo-blocked, or rate-limited."
+            evidence_summary="Website not assessed: Request timed out after 6 seconds. Website may be slow, geo-blocked, or rate-limited."
         )
     except Exception as e:
         return WebsiteCheckResult(
             url=clean_url,
             status="uncertain",
-            evidence_summary=f"Network check encountered: {type(e).__name__}. Status uncertain."
+            evidence_summary=f"Website not assessed: Network check encountered {type(e).__name__}."
         )
