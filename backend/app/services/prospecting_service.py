@@ -12,6 +12,7 @@ from backend.app.services.knowledge_service import get_approved_knowledge_summar
 from backend.app.services.ollama_service import call_ai_completion, parse_ai_json
 from backend.app.services.discovery_service import (
     get_search_pipeline,
+    init_provider_diagnostics,
     classify_instagram_url,
     extract_instagram_handle,
     clean_instagram_business_name,
@@ -21,7 +22,8 @@ from backend.app.services.discovery_service import (
     normalize_domain_or_url,
     check_duplicate_lead,
     AGGREGATOR_LISTICLE_DOMAINS,
-    LISTICLE_TITLE_PATTERNS
+    LISTICLE_TITLE_PATTERNS,
+    INSTAGRAM_RESERVED_PATHS
 )
 from backend.app.services.website_checker import check_website
 
@@ -247,6 +249,7 @@ def extract_post_and_profile_info(item: Dict[str, Any], hashtag: str) -> Optiona
     """
     Extracts public post, Reel, or profile details from search result items.
     Deduplicates and normalizes usernames, permalinks, and media IDs.
+    Handles varied URL structures: /reel/ID, /p/ID, /username/reel/ID, /username/p/ID, /username/
     """
     target_url = item.get("target_url", "").strip()
     raw_title = item.get("raw_title", "").strip()
@@ -255,8 +258,11 @@ def extract_post_and_profile_info(item: Dict[str, Any], hashtag: str) -> Optiona
     if not target_url or "instagram.com" not in target_url.lower():
         return None
 
+    # Strip query parameters (?igsh=..., ?hl=en, etc.) and anchors (#...) for clean matching
+    clean_url = target_url.split("?")[0].split("#")[0].rstrip("/")
+
     # Filter out aggregator / listicle domains
-    root_domain = extract_root_domain(target_url)
+    root_domain = extract_root_domain(clean_url)
     if not root_domain or root_domain in AGGREGATOR_LISTICLE_DOMAINS:
         return None
 
@@ -265,56 +271,69 @@ def extract_post_and_profile_info(item: Dict[str, Any], hashtag: str) -> Optiona
         return None
 
     # Analyze URL structure
-    # Patterns:
-    # 1. Post: https://www.instagram.com/p/C6Z7abc123/
-    # 2. Reel: https://www.instagram.com/reel/C8X9xyz456/
-    # 3. Profile: https://www.instagram.com/username/
-    reel_match = re.search(r"instagram\.com/reel/([A-Za-z0-9_-]+)", target_url, re.IGNORECASE)
-    post_match = re.search(r"instagram\.com/p/([A-Za-z0-9_-]+)", target_url, re.IGNORECASE)
-
     media_id = ""
     media_url = ""
     is_media = False
+    url_username = ""
 
-    if reel_match:
-        media_id = reel_match.group(1)
-        media_url = f"https://www.instagram.com/reel/{media_id}/"
+    # Check for username in URL before /reel/ or /p/
+    # e.g. instagram.com/my_boutique/reel/C8XYZ123 or instagram.com/my_boutique/p/C8XYZ123
+    user_media_match = re.search(r"instagram\.com/([a-zA-Z0-9._]{1,30})/(?:reel|reels|p)/([A-Za-z0-9_-]+)", clean_url, re.IGNORECASE)
+    if user_media_match:
+        potential_user = user_media_match.group(1).lower().strip(".")
+        if potential_user not in INSTAGRAM_RESERVED_PATHS:
+            url_username = potential_user
+        media_id = user_media_match.group(2)
+        media_type = "reel" if "/reel" in clean_url.lower() else "p"
+        media_url = f"https://www.instagram.com/{media_type}/{media_id}/"
         is_media = True
-    elif post_match:
-        media_id = post_match.group(1)
-        media_url = f"https://www.instagram.com/p/{media_id}/"
-        is_media = True
-
-    # Extract username
-    username = ""
-    if is_media:
-        # Username often in title: "Business Name (@handle) • Instagram photos and videos" or "Handle on Instagram: 'caption...'"
-        title_handle_match = re.search(r"@([a-zA-Z0-9._]{2,30})", raw_title)
-        if title_handle_match:
-            username = title_handle_match.group(1).lower().strip(".")
-        else:
-            on_ig_match = re.search(r"^([a-zA-Z0-9._]{2,30})\s+on\s+instagram", raw_title, re.IGNORECASE)
-            if on_ig_match:
-                username = on_ig_match.group(1).lower().strip(".")
-            else:
-                # Check snippet for @handle
-                snip_handle_match = re.search(r"@([a-zA-Z0-9._]{2,30})", snippet)
-                if snip_handle_match:
-                    username = snip_handle_match.group(1).lower().strip(".")
     else:
-        # Profile URL
-        is_prof, prof_user, _ = classify_instagram_url(target_url)
-        if is_prof and prof_user:
-            username = prof_user
+        # Standard /reel/ID or /p/ID
+        reel_match = re.search(r"instagram\.com/(?:reel|reels)/([A-Za-z0-9_-]+)", clean_url, re.IGNORECASE)
+        post_match = re.search(r"instagram\.com/p/([A-Za-z0-9_-]+)", clean_url, re.IGNORECASE)
+        if reel_match:
+            media_id = reel_match.group(1)
+            media_url = f"https://www.instagram.com/reel/{media_id}/"
+            is_media = True
+        elif post_match:
+            media_id = post_match.group(1)
+            media_url = f"https://www.instagram.com/p/{media_id}/"
+            is_media = True
 
+    # Determine username
+    username = url_username
     if not username:
+        if is_media:
+            # Username often in title: "@handle", "handle on Instagram", "photo by handle"
+            title_handle_match = re.search(r"@([a-zA-Z0-9._]{2,30})", raw_title)
+            if title_handle_match:
+                username = title_handle_match.group(1).lower().strip(".")
+            else:
+                on_ig_match = re.search(r"^([a-zA-Z0-9._]{2,30})\s+on\s+instagram", raw_title, re.IGNORECASE)
+                if on_ig_match:
+                    username = on_ig_match.group(1).lower().strip(".")
+                else:
+                    by_ig_match = re.search(r"by\s+([a-zA-Z0-9._]{2,30})", raw_title, re.IGNORECASE)
+                    if by_ig_match and by_ig_match.group(1).lower() not in INSTAGRAM_RESERVED_PATHS:
+                        username = by_ig_match.group(1).lower().strip(".")
+                    else:
+                        snip_handle_match = re.search(r"@([a-zA-Z0-9._]{2,30})", snippet)
+                        if snip_handle_match:
+                            username = snip_handle_match.group(1).lower().strip(".")
+        else:
+            # Profile URL: e.g. https://www.instagram.com/username/
+            is_prof, prof_user, _ = classify_instagram_url(clean_url)
+            if is_prof and prof_user:
+                username = prof_user
+
+    if not username or username in INSTAGRAM_RESERVED_PATHS:
         # If no profile can be identified, cannot create a targeted CRM prospect
         return None
 
     # Determine business name
     b_name = clean_instagram_business_name(raw_title, username)
     contacts = extract_contacts_and_links(snippet)
-    website_url = pick_best_website_url(contacts["external_links"])
+    website_url = pick_best_website_url(contacts.get("external_links", []))
 
     return {
         "business_name": b_name,
@@ -338,53 +357,99 @@ async def discover_hashtag_content(
     diagnostics: Optional[Dict[str, Any]] = None
 ) -> List[Dict[str, Any]]:
     """
-    Retrieves public posts, Reels, and profiles for a specific hashtag using the search pipeline.
+    Retrieves public posts, Reels, and profiles for a specific hashtag using the modular search pipeline.
+    Ensures safe diagnostics initialization and robust secondary fallback.
     """
+    diagnostics = init_provider_diagnostics(diagnostics)
     primary_provider, fallback_providers = get_search_pipeline()
     clean_tag = hashtag.strip().replace("#", "")
 
-    # Queries designed to surface real business posts, reels, and profiles with observable evidence
+    # Multi-format query variations for high recall across posts, reels, and profiles
     queries = [
-        f'site:instagram.com/reel/ "#{clean_tag}"',
-        f'site:instagram.com/p/ "#{clean_tag}"',
-        f'site:instagram.com "#{clean_tag}" ("boutique" OR "cafe" OR "studio" OR "store" OR "orders" OR "dm")'
+        f'site:instagram.com/reel/ {clean_tag}',
+        f'site:instagram.com/p/ {clean_tag}',
+        f'site:instagram.com/{clean_tag}',
+        f'site:instagram.com #{clean_tag}',
+        f'site:instagram.com "{clean_tag}" ("boutique" OR "cafe" OR "studio" OR "store" OR "orders" OR "dm")'
     ]
 
     raw_items: List[Dict[str, Any]] = []
-    if diagnostics is None:
-        diagnostics = {}
 
-    for q in queries:
-        try:
-            items = await primary_provider.search(
-                queries=[q],
-                limit=limit,
-                source_mode="all_sources",
-                diagnostics=diagnostics
-            )
+    try:
+        diagnostics["provider_used"] = primary_provider.name
+        diagnostics["selected_provider"] = primary_provider.name
+        diagnostics["key_configured"] = bool(primary_provider.has_key_configured())
+
+        items = await primary_provider.search(
+            queries=queries,
+            limit=limit,
+            source_mode="all_sources",
+            diagnostics=diagnostics
+        )
+        if items:
             raw_items.extend(items)
-            if len(raw_items) >= limit * 2:
-                break
-        except Exception as e:
-            logger.warning("Error running query %s with primary provider: %s", q, e)
+    except Exception as e:
+        logger.warning(f"Error running queries with primary provider ({primary_provider.name}): {e}")
+        diagnostics["provider_errors"] += 1
+        diagnostics["provider_status"] = "error"
+        diagnostics["provider_request_status"] = f"Error: {type(e).__name__}"
 
-    # Fallback to secondary provider if 0 results
-    if len(raw_items) == 0 and fallback_providers:
+    primary_req_status = diagnostics.get("provider_request_status") or "HTTP 200 OK"
+
+    # Determine whether secondary fallback should be triggered
+    should_fallback = (
+        len(raw_items) == 0
+        and fallback_providers
+        and (
+            diagnostics.get("provider_status") in ("rate_limited_202", "rate_limited_429", "unauthorized_401", "error", "timeout", "missing_key")
+            or not primary_provider.is_configured()
+            or diagnostics.get("rate_limits", 0) > 0
+            or diagnostics.get("provider_errors", 0) > 0
+        )
+    )
+
+    if should_fallback:
+        diagnostics["fallback_attempts"].append(
+            f"{primary_provider.name}: {primary_req_status} (0 results)"
+        )
         for fallback in fallback_providers:
             if not fallback.is_configured():
+                diagnostics["fallback_attempts"].append(
+                    f"{fallback.name}: Skipped (key not configured)"
+                )
                 continue
+
             try:
+                diagnostics["fallback_attempts"].append(f"Attempting fallback to {fallback.name}...")
+                diagnostics["provider_used"] = fallback.name
+                diagnostics["selected_provider"] = fallback.name
+                diagnostics["key_configured"] = bool(fallback.has_key_configured())
+                diagnostics["fallback_used"] = True
+
                 fb_items = await fallback.search(
-                    queries=queries[:2],
+                    queries=queries,
                     limit=limit,
                     source_mode="all_sources",
                     diagnostics=diagnostics
                 )
+                fb_req_status = diagnostics.get("provider_request_status", "HTTP 200 OK")
                 if fb_items:
                     raw_items = fb_items
+                    diagnostics["provider_status"] = "ok"
+                    diagnostics["fallback_attempts"].append(
+                        f"{fallback.name}: Success ({len(fb_items)} raw results, {fb_req_status})"
+                    )
                     break
-            except Exception:
-                pass
+                else:
+                    diagnostics["fallback_attempts"].append(
+                        f"{fallback.name}: {fb_req_status} (0 results)"
+                    )
+            except Exception as fb_err:
+                logger.warning(f"Fallback {fallback.name} search failed: {fb_err}")
+                diagnostics["provider_errors"] += 1
+                diagnostics["fallback_attempts"].append(
+                    f"{fallback.name}: Failed ({type(fb_err).__name__})"
+                )
 
     results = []
     seen_keys = set()
@@ -707,6 +772,7 @@ async def execute_prospecting_campaign(campaign_id: int):
         # -------------------------------------------------------------
         discovered_items: List[Dict[str, Any]] = []
         provider_failures: List[str] = []
+        all_diagnostics: List[Dict[str, Any]] = []
         discovered_posts_count = 0
         duplicates_count = 0
         rejected_count = 0
@@ -719,9 +785,25 @@ async def execute_prospecting_campaign(campaign_id: int):
             try:
                 candidates = await discover_hashtag_content(tag, limit=5, diagnostics=diagnostics)
                 discovered_posts_count += len(candidates)
+                all_diagnostics.append({"hashtag": tag, "diagnostics": diagnostics})
                 for cand in candidates:
                     cand["hashtag_info"] = ht
                     discovered_items.append(cand)
+
+                # Track failure diagnostics if 0 candidates found
+                if len(candidates) == 0:
+                    status_text = diagnostics.get("provider_request_status") or "HTTP 200 OK"
+                    prov_used = diagnostics.get("provider_used") or "Provider"
+                    if diagnostics.get("provider_status") in ("rate_limited_202", "rate_limited_429"):
+                        provider_failures.append(f"#{tag}: {prov_used} rate-limited ({status_text})")
+                    elif diagnostics.get("provider_status") in ("missing_key", "unauthorized_401", "forbidden_403"):
+                        provider_failures.append(f"#{tag}: {prov_used} {status_text} ({diagnostics.get('provider_error_message') or 'Key not configured'})")
+                    elif diagnostics.get("provider_errors", 0) > 0 or diagnostics.get("timeouts", 0) > 0:
+                        provider_failures.append(f"#{tag}: {prov_used} error ({status_text})")
+                    elif diagnostics.get("fallback_attempts"):
+                        for fa in diagnostics["fallback_attempts"]:
+                            if "Skipped" in fa or "0 results" in fa or "Bot Challenge" in fa:
+                                provider_failures.append(f"#{tag}: {fa}")
             except Exception as e:
                 provider_failures.append(f"#{tag}: {type(e).__name__} ({str(e)})")
 
@@ -740,6 +822,71 @@ async def execute_prospecting_campaign(campaign_id: int):
 
         if is_cancelled():
             return
+
+        # Check for zero discovered posts: Distinguish provider failure from genuinely empty search
+        if discovered_posts_count == 0:
+            has_provider_failure = (
+                len(provider_failures) > 0
+                or any(
+                    d.get("diagnostics", {}).get("rate_limits", 0) > 0
+                    or d.get("diagnostics", {}).get("provider_errors", 0) > 0
+                    or d.get("diagnostics", {}).get("provider_status") not in ("ok", "")
+                    for d in all_diagnostics
+                )
+            )
+
+            unique_failures = list(dict.fromkeys(provider_failures))
+
+            if has_provider_failure:
+                # Every provider failed or was blocked: Mark campaign failed with diagnostic details
+                fail_summary = " • ".join(unique_failures[:3]) if unique_failures else "Search providers rate-limited or blocked (e.g. DDG HTTP 202 Bot Challenge)"
+                error_explanation = (
+                    f"Discovery failed: 0 posts found due to provider limitations. {fail_summary}. "
+                    f"Ensure SERPER_API_KEY is configured in Render environment variables for high-reliability Google search fallback."
+                )
+                logger.warning(f"[Campaign #{campaign_id}] {error_explanation}")
+                update_campaign_progress(
+                    "failed",
+                    error_explanation,
+                    meta_status=meta_status,
+                    selected_hashtags=selected_hashtags,
+                    discovered_posts=0,
+                    unique_profiles=0,
+                    qualified=0,
+                    drafts=0,
+                    duplicates=0,
+                    rejected=rejected_count,
+                    provider_failures=unique_failures,
+                    status="failed",
+                    error_msg=error_explanation,
+                    completed=True
+                )
+                return
+            else:
+                # Genuinely empty search: Queries succeeded (HTTP 200 OK) but 0 results were indexed
+                tag_names = ", ".join(f"#{h['hashtag']}" for h in selected_hashtags)
+                notice_msg = (
+                    f"Campaign finished: 0 new posts discovered. Search executed successfully (HTTP 200 OK), "
+                    f"but no public posts were currently indexed for {tag_names}. The AI will rotate to alternative hashtags on the next campaign."
+                )
+                logger.info(f"[Campaign #{campaign_id}] {notice_msg}")
+                update_campaign_progress(
+                    "completed",
+                    notice_msg,
+                    meta_status=meta_status,
+                    selected_hashtags=selected_hashtags,
+                    discovered_posts=0,
+                    unique_profiles=0,
+                    qualified=0,
+                    drafts=0,
+                    duplicates=0,
+                    rejected=rejected_count,
+                    provider_failures=["No public posts currently indexed for these specific hashtags (HTTP 200 OK)."],
+                    results_summary=[],
+                    status="completed",
+                    completed=True
+                )
+                return
 
         # -------------------------------------------------------------
         # Stage 4 & 5: AI Analysis & Evidence-Based Qualification

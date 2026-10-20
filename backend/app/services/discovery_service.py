@@ -519,8 +519,41 @@ def evaluate_digital_opportunity(
 
 
 # ---------------------------------------------------------------------------
-# Modular Search Providers (Primary DuckDuckGo + Secondary APIs)
+# Diagnostics & Modular Search Providers
 # ---------------------------------------------------------------------------
+
+def init_provider_diagnostics(diagnostics: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """
+    Safely initializes all required diagnostic keys on a diagnostics dictionary.
+    Guarantees no provider or consumer ever raises a KeyError.
+    """
+    if diagnostics is None:
+        diagnostics = {}
+    diagnostics.setdefault("queries_executed", [])
+    diagnostics.setdefault("raw_results_count", 0)
+    diagnostics.setdefault("instagram_urls_count", 0)
+    diagnostics.setdefault("rejected_counts", {
+        "non_profile_path": 0,
+        "aggregator_or_listicle": 0,
+        "invalid_username": 0,
+        "other": 0
+    })
+    diagnostics.setdefault("valid_profiles_count", 0)
+    diagnostics.setdefault("duplicates_removed", 0)
+    diagnostics.setdefault("provider_errors", 0)
+    diagnostics.setdefault("timeouts", 0)
+    diagnostics.setdefault("rate_limits", 0)
+    diagnostics.setdefault("provider_status", "ok")
+    diagnostics.setdefault("provider_used", "DuckDuckGo")
+    diagnostics.setdefault("fallback_used", False)
+    diagnostics.setdefault("selected_provider", "")
+    diagnostics.setdefault("key_configured", False)
+    diagnostics.setdefault("provider_request_status", "")
+    diagnostics.setdefault("fallback_attempts", [])
+    diagnostics.setdefault("provider_error_message", "")
+    diagnostics.setdefault("errors", [])
+    return diagnostics
+
 
 class SearchProviderBase:
     name: str = "Base"
@@ -565,6 +598,11 @@ class DuckDuckGoSearchProvider(SearchProviderBase):
     ) -> List[Dict[str, Any]]:
         import httpx
         from bs4 import BeautifulSoup
+
+        diagnostics = init_provider_diagnostics(diagnostics)
+        diagnostics["selected_provider"] = self.name
+        diagnostics["provider_used"] = self.name
+        diagnostics["key_configured"] = False
 
         raw_results = []
         headers = {
@@ -628,7 +666,8 @@ class DuckDuckGoSearchProvider(SearchProviderBase):
                         raw_results.append({
                             "raw_title": raw_title,
                             "target_url": target_url,
-                            "snippet": snippet_text
+                            "snippet": snippet_text,
+                            "source": "DuckDuckGo"
                         })
                         diagnostics["raw_results_count"] += 1
 
@@ -673,13 +712,19 @@ class SerperSearchProvider(SearchProviderBase):
     ) -> List[Dict[str, Any]]:
         import httpx
 
+        diagnostics = init_provider_diagnostics(diagnostics)
+        diagnostics["selected_provider"] = self.name
+        diagnostics["provider_used"] = self.name
+        diagnostics["key_configured"] = self.has_key_configured()
+
         raw_results = []
         api_key = self.get_api_key()
 
         if not api_key:
             diagnostics["provider_errors"] += 1
-            diagnostics["provider_status"] = "error"
+            diagnostics["provider_status"] = "missing_key"
             diagnostics["provider_request_status"] = "Missing SERPER_API_KEY"
+            diagnostics["provider_error_message"] = "SERPER_API_KEY is not configured in environment variables."
             logger.warning("Serper search requested but SERPER_API_KEY is not configured.")
             return []
 
@@ -690,7 +735,7 @@ class SerperSearchProvider(SearchProviderBase):
         timeout = float(settings.SEARCH_TIMEOUT_SECONDS or 14.0)
 
         async with httpx.AsyncClient(timeout=timeout) as client:
-            for q in queries[:3]:
+            for q in queries[:4]:
                 diagnostics["queries_executed"].append(f"[Serper] {q}")
                 try:
                     num_results = min(10, max(1, limit))
@@ -704,23 +749,27 @@ class SerperSearchProvider(SearchProviderBase):
                             raw_results.append({
                                 "raw_title": item.get("title", ""),
                                 "target_url": item.get("link", ""),
-                                "snippet": item.get("snippet", "")
+                                "snippet": item.get("snippet", ""),
+                                "source": "Serper"
                             })
                             diagnostics["raw_results_count"] += 1
                     elif resp.status_code == 429:
                         diagnostics["rate_limits"] += 1
                         diagnostics["provider_status"] = "rate_limited_429"
                         diagnostics["provider_request_status"] = "HTTP 429 Rate Limited"
+                        diagnostics["provider_error_message"] = "Serper API quota exceeded (HTTP 429 Rate Limited)."
                         break
                     elif resp.status_code == 401:
                         diagnostics["provider_errors"] += 1
                         diagnostics["provider_status"] = "unauthorized_401"
                         diagnostics["provider_request_status"] = "HTTP 401 Unauthorized"
+                        diagnostics["provider_error_message"] = "Invalid SERPER_API_KEY (HTTP 401 Unauthorized)."
                         break
                     elif resp.status_code == 403:
                         diagnostics["provider_errors"] += 1
                         diagnostics["provider_status"] = "forbidden_403"
                         diagnostics["provider_request_status"] = "HTTP 403 Forbidden"
+                        diagnostics["provider_error_message"] = "Serper API access forbidden (HTTP 403 Forbidden)."
                         break
                     else:
                         diagnostics["provider_errors"] += 1
@@ -771,6 +820,7 @@ class TavilySearchProvider(SearchProviderBase):
     ) -> List[Dict[str, Any]]:
         import httpx
 
+        diagnostics = init_provider_diagnostics(diagnostics)
         raw_results = []
         api_key = self.get_api_key()
         if not api_key:
@@ -799,7 +849,8 @@ class TavilySearchProvider(SearchProviderBase):
                             raw_results.append({
                                 "raw_title": item.get("title", ""),
                                 "target_url": item.get("url", ""),
-                                "snippet": item.get("content", "")
+                                "snippet": item.get("content", ""),
+                                "source": "Tavily"
                             })
                             diagnostics["raw_results_count"] += 1
                     elif resp.status_code == 429:
@@ -853,6 +904,7 @@ class BraveSearchProvider(SearchProviderBase):
     ) -> List[Dict[str, Any]]:
         import httpx
 
+        diagnostics = init_provider_diagnostics(diagnostics)
         raw_results = []
         api_key = self.get_api_key()
         if not api_key:
@@ -878,7 +930,8 @@ class BraveSearchProvider(SearchProviderBase):
                             raw_results.append({
                                 "raw_title": item.get("title", ""),
                                 "target_url": item.get("url", ""),
-                                "snippet": item.get("description", "")
+                                "snippet": item.get("description", ""),
+                                "source": "Brave"
                             })
                             diagnostics["raw_results_count"] += 1
                     elif resp.status_code == 429:
@@ -932,6 +985,7 @@ class SerpApiSearchProvider(SearchProviderBase):
     ) -> List[Dict[str, Any]]:
         import httpx
 
+        diagnostics = init_provider_diagnostics(diagnostics)
         raw_results = []
         api_key = self.get_api_key()
         if not api_key:
@@ -955,7 +1009,8 @@ class SerpApiSearchProvider(SearchProviderBase):
                             raw_results.append({
                                 "raw_title": item.get("title", ""),
                                 "target_url": item.get("link", ""),
-                                "snippet": item.get("snippet", "")
+                                "snippet": item.get("snippet", ""),
+                                "source": "SerpApi"
                             })
                             diagnostics["raw_results_count"] += 1
                     elif resp.status_code == 429:

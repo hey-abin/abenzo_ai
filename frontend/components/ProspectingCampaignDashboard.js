@@ -23,7 +23,8 @@ import {
   ChevronUp,
   MessageSquare,
   Flame,
-  HelpCircle
+  HelpCircle,
+  Info
 } from "lucide-react";
 import InstagramIcon from "@/components/InstagramIcon";
 import { 
@@ -375,6 +376,52 @@ export default function ProspectingCampaignDashboard({ onLeadUpdated }) {
                   <span className="font-semibold">Documented Permission State:</span> {activeCampaign.meta_status.missing_permission}
                 </div>
               )}
+            </div>
+          )}
+
+          {/* Provider Failure & Diagnostic Details Banner */}
+          {(activeCampaign.status === "failed" || (activeCampaign.provider_failures && activeCampaign.provider_failures.length > 0 && activeCampaign.discovered_posts_count === 0)) && (
+            <div className="rounded-xl border border-rose-200 bg-rose-50/70 p-4 text-xs text-rose-900 dark:border-rose-900/60 dark:bg-rose-950/40 dark:text-rose-200 space-y-2.5">
+              <div className="flex items-center gap-2">
+                <AlertCircle className="h-4 w-4 shrink-0 text-rose-600 dark:text-rose-400" />
+                <h4 className="font-semibold text-rose-950 dark:text-rose-100">
+                  {activeCampaign.status === "failed" ? "Discovery Provider Limitations / Failure" : "Discovery Provider Status & Fallback Log"}
+                </h4>
+              </div>
+              <p className="text-[11px] leading-relaxed text-rose-900/90 dark:text-rose-200/90">
+                {activeCampaign.error_message || activeCampaign.current_step_text}
+              </p>
+
+              {activeCampaign.provider_failures && activeCampaign.provider_failures.length > 0 && (
+                <div className="rounded-lg bg-rose-100/60 p-2.5 dark:bg-rose-900/30 font-mono text-[10px] space-y-1">
+                  <span className="font-sans font-semibold text-rose-950 dark:text-rose-100 block">Logged Provider Events:</span>
+                  <ul className="list-disc list-inside space-y-0.5">
+                    {activeCampaign.provider_failures.map((f, i) => (
+                      <li key={i}>{f}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              <div className="rounded-lg bg-white/70 p-2.5 text-[11px] text-zinc-700 dark:bg-zinc-900/70 dark:text-zinc-300 border border-rose-200/50 dark:border-rose-900/40">
+                <p className="font-semibold text-zinc-900 dark:text-zinc-100 mb-0.5">💡 Production Search Guidance:</p>
+                <p className="leading-relaxed">
+                  Cloud hosting platforms (such as Render) are frequently blocked by DuckDuckGo with HTTP 202 Bot Challenge.
+                  Add <code>SERPER_API_KEY</code> to your Render environment variables to activate Google Search API fallback for 100% reliable discovery.
+                </p>
+              </div>
+            </div>
+          )}
+
+          {/* Clean Zero Results Notice (Search Succeeded, but No Posts Found) */}
+          {activeCampaign.status === "completed" && activeCampaign.discovered_posts_count === 0 && (!activeCampaign.provider_failures || activeCampaign.provider_failures.length === 0 || activeCampaign.provider_failures[0]?.includes("HTTP 200")) && (
+            <div className="rounded-xl border border-zinc-200 bg-zinc-50 p-6 text-center text-xs text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900/50 dark:text-zinc-400 space-y-2">
+              <Info className="h-6 w-6 text-zinc-400 mx-auto" />
+              <h4 className="font-semibold text-zinc-800 dark:text-zinc-200">No Public Posts Found for These Specific Hashtags</h4>
+              <p className="max-w-md mx-auto text-[11px] leading-relaxed">
+                The search providers executed normally (HTTP 200 OK), but returned 0 indexed Instagram posts or Reels under the current hashtags. 
+                The AI will explore alternative commercial niches on the next campaign run.
+              </p>
             </div>
           )}
 
